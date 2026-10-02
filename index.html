@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Regolith — asteroid fracture lab</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #dee7ed; background: #060b12; }
+    * { box-sizing: border-box; }
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .hud { position: fixed; inset: 0; pointer-events: none; padding: 34px 40px; display: flex; flex-direction: column; justify-content: space-between; }
+    .top { display: flex; justify-content: space-between; gap: 24px; }
+    .eyebrow { color: #8aa0b0; font-size: 10px; letter-spacing: .22em; text-transform: uppercase; }
+    h1 { font: 500 31px/1.1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .12em; margin: 9px 0 12px; }
+    .subtitle { color: #91a2af; font: 12px/1.6 ui-sans-serif, system-ui, sans-serif; max-width: 310px; }
+    .live { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #89eacb; box-shadow: 0 0 12px #89eacb60; margin-right: 8px; }
+    .telemetry { display: flex; gap: 28px; text-align: right; }
+    .metric strong { display: block; font-weight: 400; font-size: 23px; margin-top: 9px; }
+    .metric span { font-size: 10px; letter-spacing: .12em; color: #8195a6; }
+    .bottom { display: flex; justify-content: space-between; align-items: end; gap: 20px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; color: #94a6b4; font-size: 11px; }
+    kbd { font: inherit; color: #e5eff5; border: 1px solid #344453; border-bottom: 2px solid #475a6a; padding: 5px 8px; border-radius: 4px; margin-right: 5px; background: #0d1721b0; }
+    button { pointer-events: auto; font: inherit; font-size: 10px; letter-spacing: .09em; color: #c0d1de; border: 1px solid #334655; border-radius: 4px; background: #101b26d9; padding: 10px 13px; cursor: pointer; }
+    button:hover, button[aria-pressed="true"] { border-color: #8ccfbc; color: #9df0d3; }
+    .actions { display: flex; gap: 8px; }
+    .readout { margin-bottom: 22px; font-size: 10px; color: #75919f; letter-spacing: .1em; }
+    #event { color: #9fd7c8; margin-bottom: 13px; min-height: 14px; font-size: 11px; }
+    #status { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 14px; background: #0d1825; padding: 20px 28px; border: 1px solid #334655; max-width: 80%; }
+    .reticle { position: fixed; left: 50%; top: 50%; width: 8px; height: 8px; border: 1px solid #536b7735; border-radius: 50%; pointer-events: none; }
+    @media (max-width: 760px) { .hud { padding: 20px; } h1 { font-size: 23px; } .telemetry { gap: 14px; } .metric strong { font-size: 18px; } .subtitle { max-width: 220px; font-size: 11px; } .bottom { align-items: start; flex-direction: column; } .controls { gap: 12px; font-size: 10px; } }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <div class="top">
+      <div><div class="eyebrow"><span class="live"></span>Orbital material study / 001</div><h1>REGOLITH</h1><div class="subtitle">One asteroid. Every fragment was part of it.<br>Drill the surface. Watch the rock come apart.</div></div>
+      <div class="telemetry" aria-label="Simulation telemetry">
+        <div class="metric"><span>ROCK RETAINED</span><strong id="retained">100.0<span>%</span></strong></div>
+        <div class="metric"><span>FRAGMENTS</span><strong id="fragments">000</strong></div>
+        <div class="metric"><span>SHIP SPEED</span><strong id="speed">0<span> m/s</span></strong></div>
+      </div>
+    </div>
+    <div class="bottom">
+      <div><div id="event" aria-live="polite">READY · Point the bow at the surface and fire.</div><div class="readout">ZERO GRAVITY / ZERO DRAG / CONSERVED ROCK AREA</div><div class="controls"><span><kbd>W</kbd>Thrust</span><span><kbd>A</kbd><kbd>S</kbd>Turn</span><span><kbd>SPACE</kbd>Drill round</span><span><kbd>R</kbd>Reset</span><span>Scroll to zoom · Ship-follow camera</span></div></div>
+      <div class="actions"><button id="seams" aria-pressed="false">FRACTURE MAP</button><button id="pause" aria-pressed="false">PAUSE</button><button id="reset">RESET ↺</button></div>
+    </div>
+  </div>
+  <div class="reticle"></div><div id="status">Preparing the asteroid…</div>
+  <script src="./vendor/matter.min.js"></script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
