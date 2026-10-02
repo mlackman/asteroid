@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Fracture frame pacing check</title>
+<style>
+  body { margin: 0; background: #060b12; color: #d6eee6; font: 13px monospace; }
+  header { height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 12px; }
+  button { font: inherit; }
+  iframe { border: 0; width: 100vw; height: calc(100vh - 44px); }
+</style>
+<header>
+  <button id="start">Measure</button>
+  <button id="stop">Stop</button>
+  <output id="report">Press Measure, fire several rounds, then Stop.</output>
+</header>
+<iframe src="../index.html" title="Asteroid demo"></iframe>
+<script>
+  let measuring = false, last = 0, gaps = [];
+  const report = document.querySelector('#report');
+  document.querySelector('#start').onclick = () => { measuring = true; last = 0; gaps = []; report.textContent = 'Measuring…'; };
+  document.querySelector('#stop').onclick = () => {
+    measuring = false;
+    const sorted = [...gaps].sort((a, b) => a - b);
+    report.textContent = `${gaps.length} frames · max ${(sorted.at(-1) || 0).toFixed(1)} ms · p95 ${(sorted[Math.floor(sorted.length * .95)] || 0).toFixed(1)} ms · gaps >40 ms: ${gaps.filter(gap => gap > 40).length}`;
+  };
+  function sample(time) {
+    if (measuring && last) gaps.push(time - last);
+    last = time;
+    requestAnimationFrame(sample);
+  }
+  requestAnimationFrame(sample);
+</script>
+</html>

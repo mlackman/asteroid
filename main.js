@@ -1,6 +1,7 @@
 import * as THREE from './vendor/three.module.js';
-import { makeAsteroid, randomGenerator } from './fracture.js';
-import { Simulation, STEP } from './physics.js';
+import { makeAsteroid, randomGenerator, onSegment, rotate } from './fracture.js?v=20261003-release';
+import { Simulation, STEP } from './physics.js?v=20261003-release';
+import { FracturePlanner } from './fracture-planner.js?v=20261003-release';
 
 const status = document.querySelector('#status');
 let renderer;
@@ -18,9 +19,9 @@ const camera = new THREE.OrthographicCamera(-800, 800, 450, -450, .1, 100);
 camera.position.z = 20;
 const rockMaterial = new THREE.MeshBasicMaterial({ map: createRockTexture(), color: 0xffffff });
 const borderMaterial = new THREE.LineBasicMaterial({ color: 0xadc1c9, transparent: true, opacity: .45 });
-const seamMaterial = new THREE.LineBasicMaterial({ color: 0x97e5d0, transparent: true, opacity: .33 });
-const rockVisuals = new Map(), cellGeometry = new Map();
-let simulation, paused = false, showSeams = false, zoom = 1, accumulator = 0, last = 0, fireCooldown = 0;
+const cutMaterial = new THREE.LineBasicMaterial({ color: 0x59efb9, transparent: true, opacity: .9, depthTest: false });
+const rockVisuals = new Map();
+let simulation, fracturePlanner, paused = false, showCuts = false, followShip = false, zoom = 1, accumulator = 0, last = 0, fireCooldown = 0;
 let blastSerial = 0, telemetryTime = 0;
 const keys = new Set(), particles = [], flashes = [];
 const rockLayer = new THREE.Group(); scene.add(rockLayer);
@@ -51,53 +52,43 @@ function createRockTexture() {
   const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
 }
-function geometryForCell(cell) {
-  if (cellGeometry.has(cell.id)) return cellGeometry.get(cell.id);
+function createRockVisual(entity) {
+  const group = new THREE.Group(), content = new THREE.Group();
+  content.position.set(-entity.pivot.x, -entity.pivot.y, 0); group.add(content);
   const positions = [], uvs = [];
-  for (let i = 0; i < cell.poly.length; i++) {
-    for (const p of [cell.center, cell.poly[i], cell.poly[(i + 1) % cell.poly.length]]) {
-      positions.push(p.x, p.y, 0); uvs.push((p.x + 360) / 720, (p.y + 360) / 720);
-    }
+  for (const triangle of entity.triangles) for (const p of triangle) {
+    positions.push(p.x, p.y, 0); uvs.push((p.x + 360) / 720, (p.y + 360) / 720);
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  cellGeometry.set(cell.id, geometry);
-  return geometry;
-}
-function createRockVisual(entity) {
-  const group = new THREE.Group(), content = new THREE.Group();
-  content.position.set(-entity.pivot.x, -entity.pivot.y, 0); group.add(content);
-  entity.cells.forEach(cell => content.add(new THREE.Mesh(geometryForCell(cell), rockMaterial)));
-  const edges = new Map(), seams = [];
-  const key = p => `${Math.round(p.x * 1000)},${Math.round(p.y * 1000)}`;
-  for (const cell of entity.cells) for (let i = 0; i < cell.poly.length; i++) {
-    const a = cell.poly[i], b = cell.poly[(i + 1) % cell.poly.length], k = [key(a), key(b)].sort().join('|');
-    if (edges.has(k)) edges.get(k).count++;
-    else edges.set(k, { a, b, count: 1 });
+  content.add(new THREE.Mesh(geometry, rockMaterial));
+  const boundary = [], cuts = [], original = simulation.originalShape[0];
+  for (const ring of entity.shape) for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    boundary.push(a.x, a.y, .2, b.x, b.y, .2);
+    if (!original.some((p, j) => onSegment(a, p, original[(j + 1) % original.length], 1e-5) && onSegment(b, p, original[(j + 1) % original.length], 1e-5))) {
+      cuts.push(a.x, a.y, .3, b.x, b.y, .3);
+    }
   }
-  const boundary = [];
-  for (const { a, b, count } of edges.values()) {
-    const target = count === 1 ? boundary : seams;
-    target.push(a.x, a.y, .2, b.x, b.y, .2);
-  }
-  const edgeGeometry = new THREE.BufferGeometry(); edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(boundary, 3));
+  const edgeGeometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(boundary, 3));
   content.add(new THREE.LineSegments(edgeGeometry, borderMaterial));
-  const seamGeometry = new THREE.BufferGeometry(); seamGeometry.setAttribute('position', new THREE.Float32BufferAttribute(seams, 3));
-  const seamLines = new THREE.LineSegments(seamGeometry, seamMaterial); seamLines.visible = showSeams; content.add(seamLines);
+  const cutGeometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(cuts, 3));
+  const cutLines = new THREE.LineSegments(cutGeometry, cutMaterial); cutLines.visible = showCuts; cutLines.renderOrder = 1; content.add(cutLines);
   rockLayer.add(group);
-  rockVisuals.set(entity, { group, seamLines, edgeGeometry, seamGeometry });
+  rockVisuals.set(entity, { group, geometry, cutLines, edgeGeometry, cutGeometry });
+}
+function removeRockVisual(entity, visual) {
+  rockLayer.remove(visual.group); visual.geometry.dispose(); visual.edgeGeometry.dispose(); visual.cutGeometry.dispose();
+  rockVisuals.delete(entity);
 }
 function clearRockVisuals() {
-  for (const visual of rockVisuals.values()) {
-    rockLayer.remove(visual.group); visual.edgeGeometry.dispose(); visual.seamGeometry.dispose();
-  }
-  rockVisuals.clear();
+  for (const [entity, visual] of rockVisuals) removeRockVisual(entity, visual);
 }
 function syncRocks() {
   const existing = new Set(simulation.rocks);
   for (const [entity, visual] of rockVisuals) if (!existing.has(entity)) {
-    rockLayer.remove(visual.group); visual.edgeGeometry.dispose(); visual.seamGeometry.dispose(); rockVisuals.delete(entity);
+    removeRockVisual(entity, visual);
   }
   for (const entity of simulation.rocks) {
     if (!rockVisuals.has(entity)) createRockVisual(entity);
@@ -161,7 +152,8 @@ function blastEffect(blast) {
   const ring = new THREE.Mesh(new THREE.RingGeometry(.91, 1, 64), new THREE.MeshBasicMaterial({ color: 0xffc18a, transparent: true, opacity: .8, side: THREE.DoubleSide, depthWrite: false }));
   ring.position.set(blast.center.x, blast.center.y, 2); scene.add(ring);
   flashes.push({ ring, age: 0 });
-  document.querySelector('#event').textContent = `FRACTURE ${String(simulation.explosions).padStart(3, '0')} · ${blast.count} pieces released · ${blast.depth.toFixed(0)} m penetration`;
+  const description = blast.mode === 'split' ? `${blast.count} pieces split along drill line` : blast.count ? `${blast.count} pieces released` : 'Too little material for a stable split';
+  document.querySelector('#event').textContent = `FRACTURE ${String(simulation.explosions).padStart(3, '0')} · ${description} · ${blast.depth.toFixed(0)} m penetration`;
 }
 function effects(dt) {
   let count = 0;
@@ -185,7 +177,7 @@ function syncBullets() {
   let count = 0;
   for (const bullet of simulation.bullets) {
     if (count >= 100) break;
-    const direction = bullet.state === 'flying' ? bullet.velocity : { x: Math.cos(simulation.ship.angle), y: Math.sin(simulation.ship.angle) };
+    const direction = bullet.state === 'flying' ? bullet.velocity : rotate(bullet.direction, bullet.entity.body.angle);
     const size = Math.hypot(direction.x, direction.y) || 1;
     const tail = bullet.state === 'drilling' ? 3 : 12;
     bulletPositions.set([bullet.position.x, bullet.position.y, 3, bullet.position.x - direction.x / size * tail, bullet.position.y - direction.y / size * tail, 3], count * 6);
@@ -195,14 +187,15 @@ function syncBullets() {
 }
 function updateTelemetry() {
   document.querySelector('#retained').innerHTML = `${(simulation.retainedArea / simulation.totalArea * 100).toFixed(1)}<span>%</span>`;
-  document.querySelector('#fragments').textContent = String(simulation.rocks.length - (simulation.asteroid ? 1 : 0)).padStart(3, '0');
+  document.querySelector('#fragments').textContent = String(simulation.rocks.length - 1).padStart(3, '0');
   document.querySelector('#speed').innerHTML = `${(Math.hypot(simulation.ship.velocity.x, simulation.ship.velocity.y) * 60).toFixed(0)}<span> m/s</span>`;
 }
 function reset() {
   if (simulation) simulation.dispose();
+  if (fracturePlanner) fracturePlanner.dispose();
   clearRockVisuals();
-  for (const geometry of cellGeometry.values()) geometry.dispose(); cellGeometry.clear();
-  simulation = new Simulation(makeAsteroid());
+  fracturePlanner = new FracturePlanner();
+  simulation = new Simulation(makeAsteroid(), Math.random, request => fracturePlanner.prepare(request));
   particles.length = 0;
   for (const f of flashes) { scene.remove(f.ring); f.ring.geometry.dispose(); f.ring.material.dispose(); } flashes.length = 0;
   blastSerial = 0; accumulator = 0; fireCooldown = 0; keys.clear();
@@ -239,9 +232,15 @@ document.addEventListener('visibilitychange', () => { keys.clear(); accumulator 
 window.addEventListener('wheel', event => { event.preventDefault(); zoom = Math.max(.35, Math.min(2, zoom * Math.exp(-event.deltaY * .001))); resize(); }, { passive: false });
 document.querySelector('#reset').addEventListener('click', event => { reset(); event.currentTarget.blur(); });
 document.querySelector('#pause').addEventListener('click', event => { togglePause(); event.currentTarget.blur(); });
-document.querySelector('#seams').addEventListener('click', event => {
-  showSeams = !showSeams; event.currentTarget.setAttribute('aria-pressed', String(showSeams));
-  for (const visual of rockVisuals.values()) visual.seamLines.visible = showSeams;
+document.querySelector('#cuts').addEventListener('click', event => {
+  showCuts = !showCuts; event.currentTarget.setAttribute('aria-pressed', String(showCuts));
+  for (const visual of rockVisuals.values()) visual.cutLines.visible = showCuts;
+  event.currentTarget.blur();
+});
+document.querySelector('#follow').addEventListener('click', event => {
+  followShip = !followShip;
+  event.currentTarget.setAttribute('aria-pressed', String(followShip));
+  if (!followShip) camera.position.set(-70, 0, 20);
   event.currentTarget.blur();
 });
 function frame(time) {
@@ -252,7 +251,15 @@ function frame(time) {
     while (accumulator >= STEP) {
       fireCooldown -= STEP / 1000;
       if (keys.has('Space') && fireCooldown <= 0) { simulation.fire(); fireCooldown = .38; }
-      simulation.step(keys);
+      try {
+        simulation.step(keys);
+      } catch (error) {
+        paused = true; updatePauseButton();
+        status.textContent = `Fracture calculation failed: ${error.message}`;
+        status.hidden = false;
+        accumulator = 0;
+        break;
+      }
       if (simulation.explosions > blastSerial) { blastSerial = simulation.explosions; blastEffect(simulation.lastBlast); }
       accumulator -= STEP;
     }
@@ -269,15 +276,13 @@ function frame(time) {
   shipOutline.position.copy(shipMesh.position);
   flame.visible = engineGlow.visible = keys.has('KeyW') && !paused;
   flame.scale.y = .8 + Math.random() * .4;
-  // Keep both objects framed near the start, then follow a drifting ship.
-  const rock = simulation.asteroid?.body.position || simulation.ship.position;
-  const dx = rock.x - simulation.ship.position.x, dy = rock.y - simulation.ship.position.y;
-  const distance = Math.hypot(dx, dy), bias = Math.min(.45, 320 / Math.max(distance, 1));
-  const targetX = simulation.ship.position.x + dx * bias, targetY = simulation.ship.position.y + dy * bias;
-  camera.position.x += (targetX - camera.position.x) * (1 - Math.exp(-dt * 3));
-  camera.position.y += (targetY - camera.position.y) * (1 - Math.exp(-dt * 3));
+  // A fixed world view makes constant-velocity drift visible. Optional follow
+  // tracks directly; easing would make coasting pieces appear to speed up/slow down.
+  if (followShip && !paused) {
+    camera.position.x = simulation.ship.position.x + 270;
+    camera.position.y = simulation.ship.position.y;
+  }
   grid.position.set(Math.round(camera.position.x / 120) * 120, Math.round(camera.position.y / 120) * 120, 0);
-  stars.position.set(camera.position.x * .9, camera.position.y * .9, 0);
   telemetryTime += dt;
   if (telemetryTime > .1) { telemetryTime = 0; updateTelemetry(); }
   renderer.render(scene, camera);
