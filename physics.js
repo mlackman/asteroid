@@ -1,6 +1,6 @@
 import { rotate, sub, cross, normalize, contains, segmentHit, solidDistance } from './fracture.js?v=20261003-release';
 import { prepareRock, prepareFracture } from './rock-geometry.js?v=20261003-release';
-import { ReleaseContacts } from './release-contacts.js?v=20261003-release';
+import { outline, pointClearance } from './clearance.js?v=20261003-release';
 const { Engine, Body, Composite, Resolver, Events } = globalThis.Matter;
 // Cached penetration corrections otherwise keep translating a body after it
 // leaves contact, producing a visible burst that decays despite constant velocity.
@@ -61,7 +61,7 @@ export class Simulation {
     this.fracturePlanner = fracturePlanner;
     this.disposed = false;
     this.engine = Engine.create({ gravity: { x: 0, y: 0, scale: 0 }, positionIterations: 8, velocityIterations: 8 });
-    this.releaseContacts = new ReleaseContacts(this.engine, localToWorld, contains);
+    this.pendingSpins = [];
     Events.on(this.engine, 'collisionStart', event => reboundRockContacts(event.pairs));
     this.rocks = [];
     this.originalShape = asteroid.shape;
@@ -178,43 +178,53 @@ export class Simulation {
     const remainders = fracture.retained.map(({ shape, geometry }, i) => this.createRock(shape, origin, angle, entity.body, entity.detached || i > 0, geometry));
     const fragments = fracture.fragments.map(({ shape, geometry }) => this.createRock(shape, origin, angle, entity.body, true, geometry));
     if (wasMain) this.asteroid = remainders[0] || [...fragments].sort((a, b) => b.area - a.area)[0];
-    const released = [...remainders.slice(1), ...fragments];
-    this.releaseContacts.replace(entity, [...remainders, ...fragments], released);
-    const outward = rotate({ x: -bullet.direction.x, y: -bullet.direction.y }, angle);
+    const released = [...remainders.slice(1), ...fragments], parent = remainders[0] || null;
+    // Chips leave through the pocket's open end. The planner turns the pocket
+    // toward the surface normal, so angled hits throw debris away from the
+    // surface rather than back along the bullet.
+    const pocket = fracture.axis || bullet.direction;
+    const axis = rotate({ x: -pocket.x, y: -pocket.y }, angle);
+    // Surface chips share one drift plus an expansion proportional to their
+    // offset from the blast, so pieces fan out yet every pair moves apart.
+    // Expansion across the pocket is gentler so deep pieces stay off its walls.
+    const side = { x: -axis.y, y: axis.x };
     const offsets = released.map(fragment => sub(fragment.body.position, center));
-    const expansion = 3 / Math.max(1, ...offsets.map(offset => Math.hypot(offset.x, offset.y)));
-    const outwardSpeed = 13 + this.random();
+    const drift = 12 + this.random() * 2, maxOffset = Math.max(1, ...offsets.map(offset => Math.hypot(offset.x, offset.y)));
+    const along = (5 + this.random() * 2) / maxOffset, across = (3.5 + this.random()) / maxOffset;
+    const launches = released.map((fragment, i) => {
+      if (!parent) {
+        // A complete split has no retained cavity, so its pieces scatter
+        // around the original center of mass.
+        const direction = normalize(sub(fragment.body.position, entity.body.position)), speed = 10 + this.random() * 8;
+        return { x: direction.x * speed / 60, y: direction.y * speed / 60 };
+      }
+      const a = (offsets[i].x * axis.x + offsets[i].y * axis.y) * along, c = (offsets[i].x * side.x + offsets[i].y * side.y) * across;
+      return { x: (axis.x * (drift + a) + side.x * c) / 60, y: (axis.y * (drift + a) + side.y * c) / 60 };
+    });
+    this.separateLaunches([...remainders, ...fragments], released, launches, fracture.contacts || [], origin, angle);
     let reaction = { x: 0, y: 0 }, torque = 0;
     for (const [i, fragment] of released.entries()) {
-      // A surface chip exits through its opening. A complete split has no
-      // retained cavity, so its pieces scatter around the original center of mass.
-      // A common outward drift plus position-proportional spread keeps nearby
-      // pieces from receiving crossing trajectories or nearly identical kicks.
-      let launch;
-      if (remainders.length) launch = {
-        x: outward.x * outwardSpeed + offsets[i].x * expansion,
-        y: outward.y * outwardSpeed + offsets[i].y * expansion
-      };
-      else {
-        const direction = normalize(sub(fragment.body.position, entity.body.position));
-        const speed = 10 + this.random() * 8;
-        launch = { x: direction.x * speed, y: direction.y * speed };
-      }
-      const kick = { x: launch.x * fragment.body.mass / 60, y: launch.y * fragment.body.mass / 60 };
-      // Apply the impulse at the center of mass, preserving inherited spin;
-      // off-center collisions create the fragment's new rotation.
-      const point = fragment.body.position;
-      impulse(fragment.body, point, kick);
+      // Kicks act at the center of mass. A spin now would swing a piece's
+      // corners into the neighbors it is still touching, so its tumble waits
+      // until it has cleared them (see applyPendingSpins).
+      const kick = { x: launches[i].x * fragment.body.mass, y: launches[i].y * fragment.body.mass };
+      impulse(fragment.body, fragment.body.position, kick);
       reaction.x -= kick.x; reaction.y -= kick.y;
-      torque -= cross(sub(point, remainders[0]?.body.position || entity.body.position), kick);
+      torque -= cross(sub(fragment.body.position, parent?.body.position || entity.body.position), kick);
+      const speed = Math.hypot(launches[i].x, launches[i].y) * 60;
+      this.pendingSpins.push({
+        entity: fragment, source: parent, cohort: [...remainders, ...fragments].filter(other => other !== fragment),
+        momentum: (this.random() * 2 - 1) * .15 * Math.sqrt(fragment.area) * fragment.body.mass * speed / 60
+      });
     }
-    if (remainders[0]) {
-      const body = remainders[0].body, velocity = Body.getVelocity(body);
+    if (parent) {
+      const body = parent.body, velocity = Body.getVelocity(body);
       Body.setVelocity(body, { x: velocity.x + reaction.x / body.mass, y: velocity.y + reaction.y / body.mass });
       Body.setAngularVelocity(body, Body.getAngularVelocity(body) + torque / body.inertia);
     } else {
       // On the final fracture there is no retained body to absorb recoil.
       // Remove the shared translation/spin from the fragments as a group.
+      // This is a rigid motion of the whole group, so separation is unchanged.
       const mass = fragments.reduce((sum, f) => sum + f.body.mass, 0);
       const inertia = fragments.reduce((sum, f) => {
         const offset = sub(f.body.position, entity.body.position);
@@ -245,6 +255,72 @@ export class Simulation {
     this.lastBlast = { center, count: fragments.length + Math.max(0, remainders.length - 1), depth: bullet.traveled, mode: fracture.mode };
     bullet.state = 'spent';
   }
+  // Adjust launch velocities so every crack the blast opened is separating.
+  // Pieces start exactly touching their neighbors along shared edges; if each
+  // edge opens at a minimum rate, no piece can pass into another or into the
+  // parent. Collisions stay enabled throughout. The parent's recoil and spin
+  // follow from momentum conservation and are included in the check.
+  separateLaunches(bodies, released, launches, contacts, origin, angle) {
+    const parent = bodies.find(body => !released.includes(body)) || null;
+    const index = new Map(released.map((entity, i) => [entity, i]));
+    const toWorld = p => { const q = rotate(p, angle); return { x: origin.x + q.x, y: origin.y + q.y }; };
+    const constraints = contacts.map(({ a, b, normal, point }) => ({ a: bodies[a], b: bodies[b], normal: rotate(normal, angle), point: toWorld(point) }));
+    const minimum = 1 / 60;
+    const parentMotion = () => {
+      if (!parent) return { u: { x: 0, y: 0 }, w: 0 };
+      let px = 0, py = 0, l = 0;
+      for (const [i, entity] of released.entries()) {
+        const m = entity.body.mass;
+        px += m * launches[i].x; py += m * launches[i].y;
+        l += m * cross(sub(entity.body.position, parent.body.position), launches[i]);
+      }
+      return { u: { x: -px / parent.body.mass, y: -py / parent.body.mass }, w: -l / parent.body.inertia };
+    };
+    const velocity = (entity, point, motion) => {
+      if (entity !== parent) return launches[index.get(entity)];
+      const r = sub(point, parent.body.position);
+      return { x: motion.u.x - motion.w * r.y, y: motion.u.y + motion.w * r.x };
+    };
+    for (let iteration = 0; iteration < 200; iteration++) {
+      let worst = 0;
+      for (const { a, b, normal, point } of constraints) {
+        const motion = parentMotion(), va = velocity(a, point, motion), vb = velocity(b, point, motion);
+        const gap = minimum - ((va.x - vb.x) * normal.x + (va.y - vb.y) * normal.y);
+        if (gap <= 0) continue;
+        worst = Math.max(worst, gap);
+        // Equal and opposite impulses between two pieces; against the parent,
+        // only the piece moves here and the parent's recoil follows from it.
+        const ma = a === parent ? Infinity : a.body.mass, mb = b === parent ? Infinity : b.body.mass;
+        const lambda = gap / (1 / ma + 1 / mb) * 1.05;
+        if (a !== parent) { const v = launches[index.get(a)]; v.x += normal.x * lambda / ma; v.y += normal.y * lambda / ma; }
+        if (b !== parent) { const v = launches[index.get(b)]; v.x -= normal.x * lambda / mb; v.y -= normal.y * lambda / mb; }
+      }
+      if (worst < 1e-9) break;
+    }
+  }
+  // A piece's tumble starts once every body from its blast is outside the
+  // circle its corners sweep while spinning, so the spin cannot swing it into
+  // them. The opposite angular impulse goes to the parent, or to a remaining
+  // sibling after a complete split, so angular momentum is conserved.
+  applyPendingSpins() {
+    const outlines = new Map(), material = entity => {
+      if (!outlines.has(entity)) outlines.set(entity, outline(entity, localToWorld));
+      return outlines.get(entity);
+    };
+    this.pendingSpins = this.pendingSpins.filter(pending => {
+      const { entity, source, momentum } = pending;
+      if (!this.rocks.includes(entity)) return false;
+      const neighbors = pending.cohort.filter(other => this.rocks.includes(other));
+      const center = entity.body.position;
+      const reach = Math.max(...entity.shape.flat().map(p => { const q = localToWorld(entity, p); return Math.hypot(q.x - center.x, q.y - center.y); }));
+      if (!neighbors.every(other => pointClearance(center, material(other), contains) > reach + .5)) return true;
+      const partner = source && this.rocks.includes(source) ? source : [...neighbors].sort((x, y) => y.body.mass - x.body.mass)[0];
+      if (!partner) return false;
+      Body.setAngularVelocity(entity.body, Body.getAngularVelocity(entity.body) + momentum / entity.body.inertia);
+      Body.setAngularVelocity(partner.body, Body.getAngularVelocity(partner.body) - momentum / partner.body.inertia);
+      return false;
+    });
+  }
   step(keys = new Set()) {
     const turn = Number(keys.has('KeyA')) - Number(keys.has('KeyS') || keys.has('KeyD'));
     // Detect contact before appreciable overlap develops. Resolving a deep
@@ -259,6 +335,7 @@ export class Simulation {
       this.ship.torque += turn * this.ship.inertia * .0000018;
       Engine.update(this.engine, STEP / COLLISION_SUBSTEPS);
     }
+    if (this.pendingSpins.length) this.applyPendingSpins();
     const dt = STEP / 1000;
     for (const bullet of this.bullets) {
       bullet.age += dt;
@@ -286,5 +363,5 @@ export class Simulation {
     this.bullets = this.bullets.filter(b => b.state !== 'spent');
   }
   get retainedArea() { return this.asteroid.area; }
-  dispose() { this.disposed = true; this.releaseContacts.dispose(); Composite.clear(this.engine.world, false); Engine.clear(this.engine); }
+  dispose() { this.disposed = true; Composite.clear(this.engine.world, false); Engine.clear(this.engine); }
 }

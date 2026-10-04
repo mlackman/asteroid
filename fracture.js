@@ -183,9 +183,10 @@ function inBlastFrame(center, direction, side, forward, across) {
 }
 function blastFootprint(center, direction, side, radius, reach, profile) {
   const contour = profile.map(p => inBlastFrame(center, direction, side, radius * p.scale * Math.cos(p.angle), radius * p.scale * Math.sin(p.angle)));
-  // A coarse arc makes the closed end of the U. Its sides flare toward the
-  // exterior so deeper pieces can bounce inside and eventually escape.
-  const mouth = radius * 1.2;
+  // A coarse arc makes the closed end of the U. Its sides flare by about 20
+  // degrees toward the exterior, like a crater bowl, leaving room for pieces
+  // to spread sideways as they leave instead of sliding through the walls.
+  const mouth = radius * 1.2 + reach * .36;
   contour.push(inBlastFrame(center, direction, side, -reach, mouth));
   contour.push(inBlastFrame(center, direction, side, -reach, -mouth));
   // Keep the pocket convex: inward hooks can mechanically trap matching pieces.
@@ -236,6 +237,27 @@ function splitThrough(shape, center, direction) {
   ]];
   return [...intersection(shape, mask(1)), ...intersection(shape, mask(-1))];
 }
+// Outward normal of the outline near a surface point, averaged over the edges
+// within a few units so one jagged facet does not swing the result. Returns
+// null when the point is not on this shape's outline.
+export function surfaceNormal(shape, point, radius = 4) {
+  let sum = { x: 0, y: 0 }, nearest = Infinity;
+  for (const ring of shape) {
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], edge = sub(ring[(i + 1) % ring.length], a), edgeLength = length(edge);
+      if (!edgeLength) continue;
+      const t = Math.max(0, Math.min(1, ((point.x - a.x) * edge.x + (point.y - a.y) * edge.y) / edgeLength ** 2));
+      const distance = length(sub(point, { x: a.x + edge.x * t, y: a.y + edge.y * t }));
+      nearest = Math.min(nearest, distance);
+      if (distance > radius) continue;
+      const n = { x: edge.y / edgeLength, y: -edge.x / edgeLength };
+      const probe = { x: a.x + edge.x / 2 + n.x * .01, y: a.y + edge.y / 2 + n.y * .01 };
+      const sign = contains(shape, probe) ? -1 : 1, weight = Math.min(edgeLength, radius);
+      sum = { x: sum.x + n.x * sign * weight, y: sum.y + n.y * sign * weight };
+    }
+  }
+  return nearest > 1 || length(sum) < 1e-9 ? null : normalize(sum);
+}
 function conservesArea(area, pieces) {
   return Math.abs(pieces.reduce((sum, piece) => sum + shapeArea(piece), 0) - area) <= 1e-5;
 }
@@ -258,11 +280,18 @@ export function fractureShape(shape, entry, center, direction, random = Math.ran
     const jitter = i === 0 || i === segments ? 0 : (random() - .5) * .2;
     profile.push({ angle: (i + jitter) / segments * Math.PI - Math.PI / 2, scale: .9 + random() * .2 });
   }
-  let radius = depth * (.85 + random() * .7), cap = null;
+  let radius = depth * (.85 + random() * .7), cap = null, axis = drillDirection;
+  // A buried charge breaks out toward the nearest free surface, so the U turns
+  // from the drill line toward the inward surface normal. The turn is limited
+  // so the whole drill path stays inside the pocket and remains a fracture.
+  const normal = surfaceNormal(shape, entry);
+  const turn = normal ? Math.atan2(cross(drillDirection, { x: -normal.x, y: -normal.y }), -(drillDirection.x * normal.x + drillDirection.y * normal.y)) * .7 : 0;
   // Keep the U-shaped pocket connected to the surface and local to this
   // impact, including when an earlier shot has left a nearby cavity.
   for (let attempt = 0; attempt < 7; attempt++) {
-    const candidates = intersection(shape, blastFootprint(center, drillDirection, side, radius, reach, profile));
+    const limit = Math.min(Math.PI / 6, depth > 1e-5 ? Math.asin(Math.min(1, .8 * radius / depth)) : Math.PI / 6);
+    axis = rotate(drillDirection, Math.max(-limit, Math.min(limit, turn)));
+    const candidates = intersection(shape, blastFootprint(center, axis, { x: -axis.y, y: axis.x }, radius, reach, profile));
     cap = candidates.find(piece => contains(piece, center));
     if (cap && shapeArea(cap) <= Math.min(5200, area * .1) && extent(cap, center) < 155) break;
     cap = null; radius *= .73;
@@ -295,5 +324,5 @@ export function fractureShape(shape, entry, center, direction, random = Math.ran
   // Cuts close to existing cracks can amplify coordinate rounding. Decline
   // an ambiguous cut rather than accumulate missing material over many shots.
   if (!conservesArea(area, [...retained, ...fragments])) return unchanged;
-  return { retained, fragments, mode: 'chip' };
+  return { retained, fragments, mode: 'chip', axis };
 }

@@ -41,7 +41,12 @@ at the first cavity. Its entry-to-detonation path becomes a shared fracture edge
 On a large body, a U-shaped blast pocket surrounds the detonation point on both
 sides of the bullet's straight line. Its closed end extends into the asteroid
 as a rough arc with a few noticeable polygon corners; the open end faces the
-exterior. The pocket stays convex to avoid hooks that mechanically trap pieces.
+exterior. Like a buried charge breaking out toward the nearest free surface,
+the pocket turns from the bullet line toward the inward surface normal at the
+entry point: 70% of the way, at most 30 degrees, and never so far that the drill
+path leaves the pocket. Its sides flare by about 20 degrees toward the surface,
+like a crater bowl. The pocket stays convex to avoid hooks that mechanically
+trap pieces.
 The bullet line first splits it into two sides; optional angled polylines
 subdivide either side into uneven chunks. Radius, corner positions, cut angles
 and chunk proportions vary between blasts. Extra cuts are skipped if they would
@@ -62,12 +67,13 @@ unstable pieces below the minimum area or width. Material is never silently
 removed to simplify collision physics.
 
 Each visible outline is triangulated for rendering. Detached pieces use a slightly
-inset outline for compound-body collisions, removing a boundary strip equal to
-7.5% of the fragment's minimum width, measured independently of its orientation.
-Concave pieces and shapes with holes get less clearance if erosion would remove
-more than half their collision area. This creates space
-between matching neighbors without shrinking their visible shapes or removing
-material. Collision outlines are recomputed after another split; the inset never
+inset outline for compound-body collisions, removing a boundary strip of 0.25
+world units, or 7.5% of the fragment's minimum width on narrower pieces,
+measured independently of its orientation. Concave pieces and shapes with holes
+get less clearance if erosion would remove more than half their collision area.
+This leaves a hairline gap between matching neighbors without shrinking their
+visible shapes or removing material, and limits any visible overlap during a
+hard contact to that strip. Collision outlines are recomputed after another split; the inset never
 accumulates. Concave edges stay inside the visible rock, and holes remain empty.
 Adjacent collision triangles are merged into convex polygons when the merge
 preserves the outline exactly. This reduces repeated contacts along internal
@@ -77,27 +83,37 @@ Deeply indented outlines are subdivided for triangulation if ear clipping would
 fill extra area. Mass, center of mass and rotational inertia come from the actual
 visible polygon rather than its collider.
 
-Pieces inherit their parent's motion and receive one gentle launch toward the
-open end of the cavity. A small spread proportional to each piece's position
-separates neighboring chunks without crossing launch trajectories. Surface-chip
-launches add 10–18 world units per second; there are no ongoing release forces.
-Complete splits scatter around the original center of mass.
+Pieces inherit their parent's motion and receive one launch impulse. Surface
+chips leave along the pocket's axis, so angled hits throw debris away from the
+surface rather than back along the bullet. On top of a shared 12–14 world units
+per second drift, each piece gets an expansion proportional to its offset from
+the detonation point, stronger along the pocket than across it, so the pieces
+fan out without pressing into the flared walls. Because this is a linear
+velocity field, every pair of siblings moves apart; no trajectories cross.
+Complete splits scatter around the original center of mass. There are no
+ongoing release forces.
 
-New pieces temporarily ignore collisions with their source and siblings. After
-each physics substep integrates motion, the simulation checks the actual visible
-polygon boundaries, including concave edges and holes. Once a piece has at least
-0.25 world units of clearance from its release cohort, its normal collisions
-resume. This is geometric separation, not a timeout. Older debris and the ship
-remain solid throughout release. If another bullet splits a departing piece, its
-children inherit the exclusions and its siblings follow the replacement bodies.
+Collisions are never switched off. New pieces start exactly touching their
+neighbors along the cracks the blast created, so the fracture planner records
+every shared edge between the new bodies, with its outward normal. Before the
+launch impulses are applied, a small velocity solve adjusts them until every
+shared edge, against the parent and between siblings, opens at no less than
+1 world unit per second. The parent's recoil and spin are part of that check.
+Pairwise adjustments are equal and opposite, so momentum is still conserved; in
+practice launches change by a few percent at most. Since every crack opens, no
+piece can pass into another or back into its source.
 
-The rock system's linear and angular momentum is conserved at detonation.
-Explosion impulses preserve inherited spin; collisions create new rotation.
-After release, new rock impacts receive one elastic collision impulse, grouped
-by contact face. The solver resolves persistent contact. Cached overlap
-corrections are disabled so a correction cannot keep pushing a piece after
-contact ends. This deliberately approximates the crowded detachment phase to
-avoid compound-collider snagging while preserving normal later collisions.
+Launch impulses act at each piece's center of mass, because a spin at that
+moment would swing a piece's corners into neighbors it is still touching.
+Its gentle tumble starts once every body from its blast is outside the circle
+its corners sweep. The opposite angular impulse goes to the parent, or to the
+largest remaining sibling after a complete split.
+
+The rock system's linear and angular momentum is conserved at detonation and
+when each delayed tumble starts. Rock impacts receive one elastic collision
+impulse, grouped by contact face. The solver resolves persistent contact. Cached
+overlap corrections are disabled so a correction cannot keep pushing a piece
+after contact ends.
 
 The simulation advances at a fixed 120 Hz; each update runs eight smaller
 rigid-body collision substeps (960 Hz). Earlier contact detection limits overlap
@@ -113,22 +129,26 @@ cannot be destroyed, and extremely small pieces stop splitting for stability.
 ## Checks
 
 ```sh
-node --experimental-default-type=module --test tests/*.test.js
+node --test tests/*.test.js
 ```
 
 Tests cover complementary cuts, a faceted U with its open end toward the exterior,
+a pocket turned toward the surface normal on angled drills, pieces leaving the
+flared pocket without sliding through its walls,
 release on both sides of the straight drill edge, constant-velocity exit through
 the cavity, rotated impacts, repeated fragment splitting, concave outlines, holes, slivers, shallow drilling, inherited motion,
 area and momentum conservation, shape variety across identical impacts,
 frictionless controls, clearance without changing mass or visible outlines,
-gentle launches and unforced coasting, independent movement and passive collision
-energy across 20 seeded blasts, parent and sibling collisions restored after
-separation, a centered elastic rebound, and constant displacement after an overlap correction ends.
+outward launches with varied speed and a delayed tumble, unforced coasting, sibling
+launches that never converge, debris thrown toward the surface normal on angled hits, independent movement and passive collision
+energy across 20 seeded blasts, every shared crack opening at release, collisions
+with the parent and siblings from the moment of release, no visible overlap
+between any rocks across repeated shots into earlier debris, a centered elastic
+rebound, and constant displacement after an overlap correction ends.
 Contact displacement is checked across ten troublesome seeded blasts with
 rotating fragments; sustained thrust and turning retain their acceleration.
-Release exclusions persist while pieces overlap, expire through geometric
-separation across 20 seeded blasts, and follow a piece that is fractured again.
-Older debris remains collidable during release. Clearance is also checked on
+A piece split again in flight sends its children apart without overlapping its
+siblings. Clearance is also checked on
 rotated shapes, and visible outlines, mass, texture coordinates and bullet hit geometry retain their original dimensions.
 They also cover the real worker's complete geometry, uninterrupted coasting while
 work is pending, placement and momentum on a moving parent, stale results from
