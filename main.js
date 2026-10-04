@@ -2,6 +2,8 @@ import * as THREE from './vendor/three.module.js';
 import { makeAsteroid, randomGenerator, onSegment, rotate } from './fracture.js?v=20261003-release';
 import { Simulation, STEP } from './physics.js?v=20261003-release';
 import { FracturePlanner } from './fracture-planner.js?v=20261003-release';
+import { Game } from './game.js?v=20261004';
+import { updateHud, showEvent, describeBlast } from './hud.js?v=20261004';
 
 const status = document.querySelector('#status');
 let renderer;
@@ -21,7 +23,8 @@ const rockMaterial = new THREE.MeshBasicMaterial({ map: createRockTexture(), col
 const borderMaterial = new THREE.LineBasicMaterial({ color: 0xadc1c9, transparent: true, opacity: .45 });
 const cutMaterial = new THREE.LineBasicMaterial({ color: 0x59efb9, transparent: true, opacity: .9, depthTest: false });
 const rockVisuals = new Map();
-let simulation, fracturePlanner, paused = false, showCuts = false, followShip = false, zoom = 1, accumulator = 0, last = 0, fireCooldown = 0;
+let simulation, fracturePlanner, paused = false, showCuts = false, followShip = false, zoom = 1, accumulator = 0, last = 0;
+const game = new Game();
 let blastSerial = 0, telemetryTime = 0;
 const keys = new Set(), particles = [], flashes = [];
 const rockLayer = new THREE.Group(); scene.add(rockLayer);
@@ -152,10 +155,7 @@ function blastEffect(blast) {
   const ring = new THREE.Mesh(new THREE.RingGeometry(.91, 1, 64), new THREE.MeshBasicMaterial({ color: 0xffc18a, transparent: true, opacity: .8, side: THREE.DoubleSide, depthWrite: false }));
   ring.position.set(blast.center.x, blast.center.y, 2); scene.add(ring);
   flashes.push({ ring, age: 0 });
-  const description = blast.mode === 'split' ? `round passed through · ${blast.count + 1} pieces split along its tunnel`
-    : blast.mode === 'shatter' ? `${blast.count} pieces shattered`
-    : blast.count ? `${blast.count} pieces released` : 'Too little material for a stable split';
-  document.querySelector('#event').textContent = `FRACTURE ${String(simulation.explosions).padStart(3, '0')} · ${description} · ${blast.depth.toFixed(0)} m penetration`;
+  showEvent(describeBlast(blast, simulation.explosions));
 }
 function effects(dt) {
   let count = 0;
@@ -187,11 +187,6 @@ function syncBullets() {
   }
   bulletGeometry.setDrawRange(0, count * 2); bulletGeometry.attributes.position.needsUpdate = true;
 }
-function updateTelemetry() {
-  document.querySelector('#retained').innerHTML = `${(simulation.retainedArea / simulation.totalArea * 100).toFixed(1)}<span>%</span>`;
-  document.querySelector('#fragments').textContent = String(simulation.rocks.length - 1).padStart(3, '0');
-  document.querySelector('#speed').innerHTML = `${(Math.hypot(simulation.ship.velocity.x, simulation.ship.velocity.y) * 60).toFixed(0)}<span> m/s</span>`;
-}
 function reset() {
   if (simulation) simulation.dispose();
   if (fracturePlanner) fracturePlanner.dispose();
@@ -200,10 +195,10 @@ function reset() {
   simulation = new Simulation(makeAsteroid(), Math.random, request => fracturePlanner.prepare(request));
   particles.length = 0;
   for (const f of flashes) { scene.remove(f.ring); f.ring.geometry.dispose(); f.ring.material.dispose(); } flashes.length = 0;
-  blastSerial = 0; accumulator = 0; fireCooldown = 0; keys.clear();
+  blastSerial = 0; accumulator = 0; keys.clear(); game.newRun();
   paused = false; updatePauseButton(); camera.position.set(-70, 0, 20);
-  document.querySelector('#event').textContent = 'READY · Point the bow at the surface and fire.';
-  syncRocks(); syncBullets(); updateTelemetry();
+  showEvent('READY · Point the bow at the surface and fire.');
+  syncRocks(); syncBullets(); updateHud(game, simulation);
   status.hidden = true;
 }
 function resize() {
@@ -221,10 +216,9 @@ window.addEventListener('keydown', event => {
   if (['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyR', 'KeyP'].includes(event.code)) event.preventDefault();
   if (event.code === 'KeyR' && !event.repeat) reset();
   else if (event.code === 'KeyP' && !event.repeat) togglePause();
-  else if (event.code === 'Space' && !event.repeat && !paused && fireCooldown <= 0) {
-    // Fire on the press as well as while held: a brief tap must not disappear
-    // between animation frames.
-    simulation.fire(); fireCooldown = .38; keys.add(event.code);
+  else if (event.code === 'Space' && !event.repeat && !paused) {
+    if (game.tryFire()) simulation.fire();
+    keys.add(event.code);
   }
   else keys.add(event.code);
 });
@@ -251,10 +245,10 @@ function frame(time) {
   if (!paused) {
     accumulator += dt * 1000;
     while (accumulator >= STEP) {
-      fireCooldown -= STEP / 1000;
-      if (keys.has('Space') && fireCooldown <= 0) { simulation.fire(); fireCooldown = .38; }
+      const { controls, fire } = game.update(keys, STEP / 1000);
+      if (fire) simulation.fire();
       try {
-        simulation.step(keys);
+        simulation.step(controls);
       } catch (error) {
         paused = true; updatePauseButton();
         status.textContent = `Fracture calculation failed: ${error.message}`;
@@ -265,7 +259,7 @@ function frame(time) {
       if (simulation.explosions > blastSerial) { blastSerial = simulation.explosions; blastEffect(simulation.lastBlast); }
       accumulator -= STEP;
     }
-    if (keys.has('KeyW') && Math.random() < dt * 90) {
+    if (game.thrusting && Math.random() < dt * 90) {
       const dir = new THREE.Vector2(0, -1).rotateAround(new THREE.Vector2(), simulation.ship.angle);
       particles.push({ x: simulation.ship.position.x + dir.x * 12, y: simulation.ship.position.y + dir.y * 12, vx: dir.x * 80 + simulation.ship.velocity.x * 60, vy: dir.y * 80 + simulation.ship.velocity.y * 60, life: .35, maxLife: .35, warm: false });
     }
@@ -276,7 +270,7 @@ function frame(time) {
   shipVisual.rotation.z = simulation.ship.angle;
   shipMesh.position.set(-simulation.shipPivot.x, -simulation.shipPivot.y, 0);
   shipOutline.position.copy(shipMesh.position);
-  flame.visible = engineGlow.visible = keys.has('KeyW') && !paused;
+  flame.visible = engineGlow.visible = game.thrusting && !paused;
   flame.scale.y = .8 + Math.random() * .4;
   // A fixed world view makes constant-velocity drift visible. Optional follow
   // tracks directly; easing would make coasting pieces appear to speed up/slow down.
@@ -286,7 +280,7 @@ function frame(time) {
   }
   grid.position.set(Math.round(camera.position.x / 120) * 120, Math.round(camera.position.y / 120) * 120, 0);
   telemetryTime += dt;
-  if (telemetryTime > .1) { telemetryTime = 0; updateTelemetry(); }
+  if (telemetryTime > .1) { telemetryTime = 0; updateHud(game, simulation); }
   renderer.render(scene, camera);
 }
 resize(); reset(); requestAnimationFrame(frame);
