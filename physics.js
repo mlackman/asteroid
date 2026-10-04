@@ -132,7 +132,12 @@ export class Simulation {
     const relativeVelocity = { x: bullet.velocity.x - materialVelocity.x * 60, y: bullet.velocity.y - materialVelocity.y * 60 };
     bullet.direction = rotate(normalize(relativeVelocity), -hit.entity.body.angle);
     const depth = 14 + this.random() * 20;
-    bullet.depth = Math.max(0, solidDistance(hit.entity.shape, bullet.entry, bullet.direction, depth) - .0001);
+    // A round that would come out the far side passes through: it drills to
+    // the exit, leaves, and detonates just outside, cracking the rock along
+    // its tunnel. Otherwise it stops at its depth or at the first cavity.
+    const thickness = solidDistance(hit.entity.shape, bullet.entry, bullet.direction, depth + 1);
+    bullet.through = thickness <= depth;
+    bullet.depth = Math.max(0, Math.min(depth, thickness) - .0001);
     bullet.traveled = 0;
     bullet.position = localToWorld(hit.entity, bullet.local);
     this.planFracture(bullet);
@@ -143,7 +148,7 @@ export class Simulation {
     const center = { x: bullet.local.x + bullet.direction.x * remaining, y: bullet.local.y + bullet.direction.y * remaining };
     const plan = { entity: bullet.entity, center, result: null, error: null };
     bullet.plan = plan;
-    const request = { shape: bullet.entity.shape, entry: bullet.entry, center, direction: bullet.direction, detached: bullet.entity.detached, seed: Math.floor(this.random() * 4294967296) };
+    const request = { shape: bullet.entity.shape, entry: bullet.entry, center, direction: bullet.direction, detached: bullet.entity.detached, through: bullet.through, seed: Math.floor(this.random() * 4294967296) };
     // Only publish readiness here. Bodies are replaced inside a fixed physics
     // step, using the parent's current pose rather than its pose when work began.
     Promise.resolve(this.fracturePlanner(request)).then(result => {
@@ -162,13 +167,14 @@ export class Simulation {
       if (!bullet.plan.result) return;
       fracture = bullet.plan.result;
     } else {
-      fracture = prepareFracture({ shape: entity.shape, entry: bullet.entry, center: bullet.local, direction: bullet.direction, detached: entity.detached }, this.random);
+      fracture = prepareFracture({ shape: entity.shape, entry: bullet.entry, center: bullet.local, direction: bullet.direction, detached: entity.detached, through: bullet.through }, this.random);
     }
     const center = localToWorld(entity, bullet.local);
     if (fracture.mode === 'none') {
       this.explosions++;
-      this.lastBlast = { center, count: 0, depth: bullet.traveled, mode: 'none' };
+      this.lastBlast = { center: bullet.through ? { ...bullet.position } : center, count: 0, depth: bullet.traveled, mode: 'none' };
       bullet.state = 'spent';
+      if (bullet.through) this.pushOutside(bullet.position);
       return;
     }
     const origin = localToWorld(entity, { x: 0, y: 0 }), angle = entity.body.angle;
@@ -184,22 +190,26 @@ export class Simulation {
     // surface rather than back along the bullet.
     const pocket = fracture.axis || bullet.direction;
     const axis = rotate({ x: -pocket.x, y: -pocket.y }, angle);
-    // Surface chips share one drift plus an expansion proportional to their
+    // Crater chips share one drift plus an expansion proportional to their
     // offset from the blast, so pieces fan out yet every pair moves apart.
     // Expansion across the pocket is gentler so deep pieces stay off its walls.
     const side = { x: -axis.y, y: axis.x };
-    const offsets = released.map(fragment => sub(fragment.body.position, center));
+    const chips = fracture.mode === 'chip' ? fragments : [];
+    const offsets = chips.map(fragment => sub(fragment.body.position, center));
     const drift = 12 + this.random() * 2, maxOffset = Math.max(1, ...offsets.map(offset => Math.hypot(offset.x, offset.y)));
     const along = (5 + this.random() * 2) / maxOffset, across = (3.5 + this.random()) / maxOffset;
-    const launches = released.map((fragment, i) => {
-      if (!parent) {
-        // A complete split has no retained cavity, so its pieces scatter
-        // around the original center of mass.
-        const direction = normalize(sub(fragment.body.position, entity.body.position)), speed = 10 + this.random() * 8;
-        return { x: direction.x * speed / 60, y: direction.y * speed / 60 };
+    const launches = released.map(fragment => {
+      const i = chips.indexOf(fragment);
+      if (i >= 0) {
+        const a = (offsets[i].x * axis.x + offsets[i].y * axis.y) * along, c = (offsets[i].x * side.x + offsets[i].y * side.y) * across;
+        return { x: (axis.x * (drift + a) + side.x * c) / 60, y: (axis.y * (drift + a) + side.y * c) / 60 };
       }
-      const a = (offsets[i].x * axis.x + offsets[i].y * axis.y) * along, c = (offsets[i].x * side.x + offsets[i].y * side.y) * across;
-      return { x: (axis.x * (drift + a) + side.x * c) / 60, y: (axis.y * (drift + a) + side.y * c) / 60 };
+      // Pieces broken off by a wall crack, a shatter, or a tunnel split are
+      // pushed away from the blast. Wall pieces sit behind the crater and get
+      // a gentler push than the chips.
+      const direction = normalize(sub(fragment.body.position, center));
+      const speed = fracture.mode === 'chip' ? 4 + this.random() * 4 : 10 + this.random() * 8;
+      return { x: direction.x * speed / 60, y: direction.y * speed / 60 };
     });
     this.separateLaunches([...remainders, ...fragments], released, launches, fracture.contacts || [], origin, angle);
     let reaction = { x: 0, y: 0 }, torque = 0;
@@ -245,15 +255,33 @@ export class Simulation {
         if (replacement) {
           other.entity = replacement;
           const remaining = Math.max(0, other.depth - other.traveled);
-          other.depth = other.traveled + Math.max(0, solidDistance(replacement.shape, other.local, other.direction, remaining) - .0001);
+          const thickness = solidDistance(replacement.shape, other.local, other.direction, remaining + 1);
+          other.through = thickness <= remaining;
+          other.depth = other.traveled + Math.max(0, Math.min(remaining, thickness) - .0001);
           this.planFracture(other);
         }
         else other.state = 'spent';
       }
     }
     this.explosions++;
-    this.lastBlast = { center, count: fragments.length + Math.max(0, remainders.length - 1), depth: bullet.traveled, mode: fracture.mode };
+    this.lastBlast = { center: bullet.through ? { ...bullet.position } : center, count: fragments.length + Math.max(0, remainders.length - 1), depth: bullet.traveled, mode: fracture.mode };
     bullet.state = 'spent';
+    if (bullet.through) this.pushOutside(bullet.position, [...remainders, ...fragments]);
+  }
+  // A round that detonates outside any rock pushes the rocks around it,
+  // weakening with distance and with the rock's size. The rock it passed
+  // through has already been cracked and launched by the same blast.
+  pushOutside(point, launched = []) {
+    const radius = 60;
+    for (const rock of this.rocks) {
+      if (launched.includes(rock)) continue;
+      const distance = pointClearance(point, outline(rock, localToWorld), contains);
+      if (distance >= radius) continue;
+      const direction = normalize(sub(rock.body.position, point));
+      const speed = 8 * (1 - distance / radius) * Math.min(1, 1500 / rock.area) / 60;
+      const v = Body.getVelocity(rock.body);
+      Body.setVelocity(rock.body, { x: v.x + direction.x * speed, y: v.y + direction.y * speed });
+    }
   }
   // Adjust launch velocities so every crack the blast opened is separating.
   // Pieces start exactly touching their neighbors along shared edges; if each
@@ -345,6 +373,22 @@ export class Simulation {
         if (hit) this.startDrill(bullet, hit);
         else bullet.position = to;
         if (bullet.age > 5) bullet.state = 'spent';
+      } else if (bullet.state === 'exited') {
+        // Out the far side on a short fuse. Another rock in the way takes the
+        // round instead; otherwise it detonates in open space.
+        bullet.fuse -= dt;
+        if (bullet.fuse > 0) {
+          const to = { x: bullet.position.x + bullet.velocity.x * dt, y: bullet.position.y + bullet.velocity.y * dt };
+          const hit = this.findHit(bullet.position, to);
+          if (hit && hit.entity !== bullet.entity) { bullet.through = false; this.startDrill(bullet, hit); }
+          else bullet.position = to;
+        } else if (this.rocks.includes(bullet.entity)) this.explode(bullet);
+        else {
+          this.explosions++;
+          this.lastBlast = { center: { ...bullet.position }, count: 0, depth: bullet.traveled, mode: 'none' };
+          this.pushOutside(bullet.position);
+          bullet.state = 'spent';
+        }
       } else if (bullet.state === 'drilling') {
         // Stop at the first void or at the short depth cap. A round cannot
         // tunnel across a cavity and detonate on the far side of the asteroid.
@@ -357,7 +401,15 @@ export class Simulation {
         } else bullet.depth = bullet.traveled;
         if (step < requested) bullet.depth = bullet.traveled;
         bullet.position = localToWorld(bullet.entity, bullet.local);
-        if (bullet.traveled >= bullet.depth - 1e-6) this.explode(bullet);
+        if (bullet.traveled >= bullet.depth - 1e-6) {
+          if (bullet.through) {
+            const exit = rotate(bullet.direction, bullet.entity.body.angle);
+            bullet.state = 'exited';
+            bullet.velocity = { x: bullet.velocity.x * .5, y: bullet.velocity.y * .5 };
+            bullet.position = { x: bullet.position.x + exit.x * .05, y: bullet.position.y + exit.y * .05 };
+            bullet.fuse = 8 / Math.hypot(bullet.velocity.x, bullet.velocity.y);
+          } else this.explode(bullet);
+        }
       }
     }
     this.bullets = this.bullets.filter(b => b.state !== 'spent');

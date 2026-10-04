@@ -152,7 +152,9 @@ function blastEffect(blast) {
   const ring = new THREE.Mesh(new THREE.RingGeometry(.91, 1, 64), new THREE.MeshBasicMaterial({ color: 0xffc18a, transparent: true, opacity: .8, side: THREE.DoubleSide, depthWrite: false }));
   ring.position.set(blast.center.x, blast.center.y, 2); scene.add(ring);
   flashes.push({ ring, age: 0 });
-  const description = blast.mode === 'split' ? `${blast.count} pieces split along drill line` : blast.count ? `${blast.count} pieces released` : 'Too little material for a stable split';
+  const description = blast.mode === 'split' ? `round passed through · ${blast.count + 1} pieces split along its tunnel`
+    : blast.mode === 'shatter' ? `${blast.count} pieces shattered`
+    : blast.count ? `${blast.count} pieces released` : 'Too little material for a stable split';
   document.querySelector('#event').textContent = `FRACTURE ${String(simulation.explosions).padStart(3, '0')} · ${description} · ${blast.depth.toFixed(0)} m penetration`;
 }
 function effects(dt) {

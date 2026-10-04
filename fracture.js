@@ -6,6 +6,8 @@ const EPSILON = 1e-7;
 clipping.setPrecision(1e-9);
 const MIN_PIECE_AREA = 35;
 const MAX_FRAGMENTS = 4;
+// Wall cracks can add up to two larger pieces beside the crater chips.
+const MAX_RELEASED = 6;
 
 export function randomGenerator(seed) {
   return () => {
@@ -258,20 +260,128 @@ export function surfaceNormal(shape, point, radius = 4) {
   }
   return nearest > 1 || length(sum) < 1e-9 ? null : normalize(sum);
 }
+// Edges that pieces of one fracture share. Each entry gives the outward normal
+// of piece b's edge, pointing into piece a, and the shared segment's midpoint.
+// Separating the pair without either passing through the other requires a's
+// velocity relative to b to have a non-negative component along every normal.
+export function sharedBoundaries(shapes, tolerance = 1e-6) {
+  const edges = shapes.map(shape => shape.flatMap(ring => ring.map((a, i) => {
+    const b = ring[(i + 1) % ring.length], d = sub(b, a), l = length(d);
+    return { a, b, d: l ? { x: d.x / l, y: d.y / l } : null, l,
+      min: { x: Math.min(a.x, b.x) - tolerance, y: Math.min(a.y, b.y) - tolerance },
+      max: { x: Math.max(a.x, b.x) + tolerance, y: Math.max(a.y, b.y) + tolerance } };
+  }).filter(edge => edge.d)));
+  const contacts = [];
+  for (let i = 0; i < shapes.length; i++) for (let j = i + 1; j < shapes.length; j++) {
+    for (const e of edges[j]) for (const f of edges[i]) {
+      if (f.max.x < e.min.x || f.min.x > e.max.x || f.max.y < e.min.y || f.min.y > e.max.y) continue;
+      // Collinear and overlapping by a positive length: a shared crack.
+      if (Math.abs(cross(e.d, sub(f.a, e.a))) > tolerance || Math.abs(cross(e.d, sub(f.b, e.a))) > tolerance) continue;
+      const t0 = (f.a.x - e.a.x) * e.d.x + (f.a.y - e.a.y) * e.d.y, t1 = (f.b.x - e.a.x) * e.d.x + (f.b.y - e.a.y) * e.d.y;
+      const lo = Math.max(0, Math.min(t0, t1)), hi = Math.min(e.l, Math.max(t0, t1));
+      if (hi - lo <= tolerance) continue;
+      const mid = { x: e.a.x + e.d.x * (lo + hi) / 2, y: e.a.y + e.d.y * (lo + hi) / 2 };
+      let normal = { x: e.d.y, y: -e.d.x };
+      if (contains(shapes[j], { x: mid.x + normal.x * 1e-4, y: mid.y + normal.y * 1e-4 })) normal = { x: -normal.x, y: -normal.y };
+      contacts.push({ a: i, b: j, normal, point: mid });
+    }
+  }
+  return contacts;
+}
+function pointSegmentDistance(p, a, b) {
+  const d = sub(b, a), l2 = d.x * d.x + d.y * d.y;
+  const t = l2 ? Math.max(0, Math.min(1, ((p.x - a.x) * d.x + (p.y - a.y) * d.y) / l2)) : 0;
+  return length(sub(p, { x: a.x + d.x * t, y: a.y + d.y * t }));
+}
+// Crack a shape along an open polyline. The cut mask extends the line in both
+// directions so it always crosses the outline, but rock is only separated where
+// the crack itself runs: regions divided only by an extension are joined again.
+// A crack that ends inside the rock, or opens only into a hole, separates nothing.
+function cutAlong(shape, crack) {
+  const first = normalize(sub(crack[1], crack[0])), last = normalize(sub(crack.at(-1), crack.at(-2)));
+  const reach = extent(shape, crack[0]) * 6 + 10;
+  const start = { x: crack[0].x - first.x * reach, y: crack[0].y - first.y * reach };
+  const end = { x: crack.at(-1).x + last.x * reach, y: crack.at(-1).y + last.y * reach };
+  const overall = normalize(sub(end, start)), left = { x: -overall.y * reach, y: overall.x * reach };
+  const mask = [[start, ...crack, end, { x: end.x + left.x, y: end.y + left.y }, { x: start.x + left.x, y: start.y + left.y }]];
+  const regions = [...intersection(shape, mask), ...difference(shape, [mask])];
+  const onCrack = p => crack.some((a, i) => i < crack.length - 1 && pointSegmentDistance(p, a, crack[i + 1]) < 1e-6);
+  const group = regions.map((_, i) => i), find = i => group[i] === i ? i : (group[i] = find(group[i]));
+  for (const { a, b, point } of sharedBoundaries(regions)) if (!onCrack(point)) group[find(a)] = find(b);
+  const merged = new Map();
+  regions.forEach((region, i) => merged.set(find(i), [...(merged.get(find(i)) || []), region]));
+  return [...merged.values()].flatMap(parts => parts.length === 1 ? parts : fromCoordinates(clipping.union(...parts.map(toCoordinates))));
+}
+// A rough crack running outward from `from` along `direction` for `distance`,
+// then a little past it, with a few small sideways kinks.
+function crackLine(from, direction, start, distance, random) {
+  const side = { x: -direction.y, y: direction.x }, points = [];
+  for (const t of [0, 1 / 3, 2 / 3]) {
+    const along = start + distance * t, offset = t ? (random() - .5) * .24 * distance : 0;
+    points.push({ x: from.x + direction.x * along + side.x * offset, y: from.y + direction.y * along + side.y * offset });
+  }
+  points.push({ x: from.x + direction.x * (start + distance + 2), y: from.y + direction.y * (start + distance + 2) });
+  return points;
+}
 function conservesArea(area, pieces) {
   return Math.abs(pieces.reduce((sum, piece) => sum + shapeArea(piece), 0) - area) <= 1e-5;
 }
-export function fractureShape(shape, entry, center, direction, random = Math.random) {
+// A round that passes through a body cracks it along its tunnel. The pieces
+// keep their exterior; the largest one stays as the parent.
+function tunnelSplit(shape, entry, exit, area) {
+  const pieces = cutAlong(shape, [entry, exit]).sort((a, b) => shapeArea(b) - shapeArea(a));
+  if (pieces.length < 2 || pieces.length > MAX_FRAGMENTS || pieces.some(isSliver) || !conservesArea(area, pieces)) return null;
+  return { retained: [pieces[0]], fragments: pieces.slice(1), mode: 'split' };
+}
+// A blast too large for its body breaks it into wedges around the detonation.
+// The first crack runs to the nearest free surface; the rest divide the circle
+// roughly evenly. Bigger bodies break into more pieces.
+function shatter(shape, center, area, random) {
+  const count = Math.min(MAX_FRAGMENTS, 2 + (area > 600) + (area > 1500));
+  const reach = extent(shape, center) + 10, toSurface = angle => solidDistance(shape, center, { x: Math.cos(angle), y: Math.sin(angle) }, reach);
+  let nearest = 0;
+  for (let i = 1; i < 48; i++) if (toSurface(i / 48 * Math.PI * 2) < toSurface(nearest)) nearest = i / 48 * Math.PI * 2;
+  const step = Math.PI * 2 / count;
+  const angles = Array.from({ length: count }, (_, i) => nearest + i * step + (i ? (random() - .5) * .5 * step : 0));
+  const cracks = angles.map(angle => {
+    const direction = { x: Math.cos(angle), y: Math.sin(angle) };
+    return crackLine(center, direction, 0, Math.min(toSurface(angle), reach), random).slice(0, -1)
+      .concat([{ x: center.x + direction.x * reach, y: center.y + direction.y * reach }]);
+  });
+  const wedges = angles.map((angle, i) => {
+    const next = angles[(i + 1) % count] + (i === count - 1 ? Math.PI * 2 : 0), arc = [];
+    for (let a = angle + .3; a < next - .15; a += .3) arc.push({ x: center.x + Math.cos(a) * reach, y: center.y + Math.sin(a) * reach });
+    return [[...cracks[i], ...arc, ...[...cracks[(i + 1) % count]].reverse().slice(0, -1)]];
+  });
+  const pieces = mergeSlivers(wedges.flatMap(wedge => intersection(shape, wedge)));
+  if (pieces.length < 2 || pieces.some(isSliver) || !conservesArea(area, pieces)) return null;
+  return { retained: [], fragments: pieces, mode: 'shatter' };
+}
+// Rock between the blast pocket and the outer surface fails where it is thin
+// compared with the blast. Look across the pocket's closed end for the
+// thinnest walls and run a crack through each one that is thinner than the
+// blast radius. On a large asteroid the walls are thick and nothing cracks.
+function wallCracks(shape, cap, center, axis, radius, random) {
+  const reach = extent(shape, center) + 10, samples = [];
+  for (let i = -16; i <= 16; i++) {
+    const direction = rotate(axis, i / 16 * Math.PI * 4 / 9);
+    const inPocket = solidDistance(cap, center, direction, reach), toSurface = solidDistance(shape, center, direction, reach);
+    // Rays that leave through the pocket's open end have no wall.
+    samples.push({ direction, inPocket, wall: toSurface - inPocket < 1e-3 ? Infinity : toSurface - inPocket });
+  }
+  const thin = samples.filter((sample, i) => sample.wall < radius &&
+    sample.wall <= (samples[i - 1]?.wall ?? Infinity) && sample.wall <= (samples[i + 1]?.wall ?? Infinity));
+  const chosen = [];
+  for (const sample of thin.sort((a, b) => a.wall - b.wall)) {
+    if (chosen.every(other => other.direction.x * sample.direction.x + other.direction.y * sample.direction.y < Math.cos(Math.PI * 5 / 18))) chosen.push(sample);
+  }
+  return chosen.slice(0, 2).map(({ direction, inPocket, wall }) => crackLine(center, direction, Math.max(0, inPocket - .5), wall + .5, random));
+}
+export function fractureShape(shape, entry, center, direction, random = Math.random, through = false) {
   const area = shapeArea(shape);
   const unchanged = { retained: [shape], fragments: [], mode: 'none' };
   if (area < MIN_PIECE_AREA * 2) return unchanged;
-  if (area <= 8000) {
-    // Small pieces retain their existing exterior and split along the bullet
-    // line. Every disconnected outline counts toward the four-piece limit.
-    const halves = splitThrough(shape, center, direction);
-    if (halves.length < 2 || halves.length > MAX_FRAGMENTS || halves.some(isSliver) || !conservesArea(area, halves)) return unchanged;
-    return { retained: [], fragments: halves, mode: 'split' };
-  }
+  if (through) return tunnelSplit(shape, entry, center, area) || unchanged;
   const drillDirection = length(sub(center, entry)) > 1e-5 ? normalize(sub(center, entry)) : normalize(direction);
   const side = { x: -drillDirection.y, y: drillDirection.x };
   const depth = length(sub(center, entry)), reach = extent(shape, center) * 6 + 10;
@@ -287,17 +397,20 @@ export function fractureShape(shape, entry, center, direction, random = Math.ran
   const normal = surfaceNormal(shape, entry);
   const turn = normal ? Math.atan2(cross(drillDirection, { x: -normal.x, y: -normal.y }), -(drillDirection.x * normal.x + drillDirection.y * normal.y)) * .7 : 0;
   // Keep the U-shaped pocket connected to the surface and local to this
-  // impact, including when an earlier shot has left a nearby cavity.
+  // impact, including when an earlier shot has left a nearby cavity. A pocket
+  // that would take out a large share of the body means the blast is too big
+  // for it: the whole body shatters instead.
   for (let attempt = 0; attempt < 7; attempt++) {
     const limit = Math.min(Math.PI / 6, depth > 1e-5 ? Math.asin(Math.min(1, .8 * radius / depth)) : Math.PI / 6);
     axis = rotate(drillDirection, Math.max(-limit, Math.min(limit, turn)));
     const candidates = intersection(shape, blastFootprint(center, axis, { x: -axis.y, y: axis.x }, radius, reach, profile));
     cap = candidates.find(piece => contains(piece, center));
-    if (cap && shapeArea(cap) <= Math.min(5200, area * .1) && extent(cap, center) < 155) break;
+    if (attempt === 0 && (!cap || shapeArea(cap) > area * .4)) return shatter(shape, center, area, random) || unchanged;
+    if (cap && shapeArea(cap) <= Math.min(5200, area * .4) && extent(cap, center) < 155) break;
     cap = null; radius *= .73;
   }
   if (!cap || isSliver(cap)) return unchanged;
-  const retained = difference(shape, [cap]);
+  let retained = difference(shape, [cap]);
   const budget = MAX_FRAGMENTS - Math.max(0, retained.length - 1);
   if (budget < 2 || retained.some(isSliver)) return unchanged;
   // The bullet path divides the whole blast first, so neither side is chosen
@@ -320,6 +433,10 @@ export function fractureShape(shape, entry, center, direction, random = Math.ran
     if (children.length >= 2 && fragments.length - 1 + children.length <= budget && !children.some(isSliver) && children.every(piece => 4 * Math.PI * shapeArea(piece) / perimeter(piece) ** 2 >= .5)) {
       fragments.splice(fragments.indexOf(half), 1, ...children);
     }
+  }
+  for (const crack of wallCracks(shape, cap, center, axis, radius, random)) {
+    const cracked = retained.flatMap(piece => cutAlong(piece, crack));
+    if (cracked.length > retained.length && cracked.length - 1 + fragments.length <= MAX_RELEASED && !cracked.some(isSliver)) retained = cracked;
   }
   // Cuts close to existing cracks can amplify coordinate rounding. Decline
   // an ambiguous cut rather than accumulate missing material over many shots.

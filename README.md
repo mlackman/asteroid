@@ -38,7 +38,16 @@ its current outline, including concave edges and any holes. A bullet records its
 surface entry and drills to a random depth of 14–34 world units, stopping earlier
 at the first cavity. Its entry-to-detonation path becomes a shared fracture edge.
 
-On a large body, a U-shaped blast pocket surrounds the detonation point on both
+If the rock along its path is thinner than the drill depth, the round passes
+through. It leaves the far side at half speed and detonates about 8 world units
+beyond it. That blast cracks the rock along the tunnel; only rock the round
+actually passed through is cut, so a line through one arm of a concave piece
+leaves the other arm whole, and a tunnel that opens into a hole separates
+nothing. The blast also pushes rocks within 60 world units, less with distance
+and with size. A rock in the way before the fuse runs out takes the round instead.
+
+A round that stops inside a body detonates there, and the result depends on how
+large the blast is compared with that body. On a large body, a U-shaped blast pocket surrounds the detonation point on both
 sides of the bullet's straight line. Its closed end extends into the asteroid
 as a rough arc with a few noticeable polygon corners; the open end faces the
 exterior. Like a buried charge breaking out toward the nearest free surface,
@@ -54,10 +63,18 @@ produce narrow shards. Each successful
 blast releases 2–4 pieces, counting any disconnected regions of the parent rock.
 The region is bounded by distance and area, so shots chip the surface gradually.
 
-On a small body (area at most 8,000 square world units), the bullet-aligned cut
-continues through the entire outline. It normally creates two pieces with their
-existing exterior preserved; concave shapes can produce up to four disconnected
-pieces. Existing fragments can be shot and split again along a new line.
+Rock between the pocket and the outer surface fails where it is thin compared
+with the blast. Across the pocket's closed end, the walls that are thinner than
+the blast radius crack through to the surface along rough lines, up to two of
+them, breaking off larger pieces beside the crater chips. The intact asteroid's
+walls are far too thick for this; a medium fragment often cracks, and an
+asteroid worn thin between old cavities occasionally does.
+
+If the pocket would take out more than 40% of the body, the blast is too large
+for it and the whole body shatters into 2–4 wedges around the detonation point,
+more for larger bodies. The first crack runs to the nearest free surface and
+the others divide the circle roughly evenly. Freshly released fragments usually
+shatter when a round stops inside them.
 
 Polygon intersection and subtraction preserve the complementary shapes and all
 rock area to numerical precision. Texture coordinates stay in the original
@@ -83,15 +100,16 @@ Deeply indented outlines are subdivided for triangulation if ear clipping would
 fill extra area. Mass, center of mass and rotational inertia come from the actual
 visible polygon rather than its collider.
 
-Pieces inherit their parent's motion and receive one launch impulse. Surface
-chips leave along the pocket's axis, so angled hits throw debris away from the
+Pieces inherit their parent's motion and receive one launch impulse. Pieces
+from a wall crack, a shatter or a tunnel split move away from the blast point;
+wall pieces sit behind the crater and get a gentler push. Crater chips leave
+along the pocket's axis, so angled hits throw debris away from the
 surface rather than back along the bullet. On top of a shared 12–14 world units
 per second drift, each piece gets an expansion proportional to its offset from
 the detonation point, stronger along the pocket than across it, so the pieces
 fan out without pressing into the flared walls. Because this is a linear
 velocity field, every pair of siblings moves apart; no trajectories cross.
-Complete splits scatter around the original center of mass. There are no
-ongoing release forces.
+There are no ongoing release forces.
 
 Collisions are never switched off. New pieces start exactly touching their
 neighbors along the cracks the blast created, so the fracture planner records
@@ -133,6 +151,9 @@ node --test tests/*.test.js
 ```
 
 Tests cover complementary cuts, a faceted U with its open end toward the exterior,
+rounds that pass through a piece cracking only the rock they crossed and
+detonating outside it, blasts that shatter small bodies, crack thin walls of
+medium ones and only crater large ones,
 a pocket turned toward the surface normal on angled drills, pieces leaving the
 flared pocket without sliding through its walls,
 release on both sides of the straight drill edge, constant-velocity exit through
@@ -147,7 +168,7 @@ between any rocks across repeated shots into earlier debris, a centered elastic
 rebound, and constant displacement after an overlap correction ends.
 Contact displacement is checked across ten troublesome seeded blasts with
 rotating fragments; sustained thrust and turning retain their acceleration.
-A piece split again in flight sends its children apart without overlapping its
+A piece broken again in flight sends its children apart without overlapping its
 siblings. Clearance is also checked on
 rotated shapes, and visible outlines, mass, texture coordinates and bullet hit geometry retain their original dimensions.
 They also cover the real worker's complete geometry, uninterrupted coasting while
