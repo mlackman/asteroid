@@ -1,7 +1,7 @@
 // Run state and game rules. Independent of rendering and of the physics
 // engine: the game decides which controls reach the simulation, and the
 // simulation stays a pure physical model. Tunables live in config.js.
-import { SHIP, ECONOMY, STATION } from './config.js?v=20261004';
+import { SHIP, ECONOMY, STATION, DEBUG } from './config.js?v=20261004';
 export { SHIP };
 
 // What delivered material pays. Rock stuck to the ore pays nothing; it only
@@ -10,10 +10,19 @@ export function payout({ oreArea }, economy = ECONOMY) {
   return oreArea * economy.oreValue;
 }
 
+// One fixed simulation step as the page runs it: the rules decide which
+// controls reach the ship, then the physics advances.
+export function stepGame(game, simulation, keys, dt) {
+  const { controls, fire } = game.update(keys, dt);
+  if (fire) simulation.fire();
+  simulation.step(controls);
+}
+
 export class Game {
-  constructor(ship = SHIP, station = STATION) {
+  constructor(ship = SHIP, station = STATION, debug = DEBUG) {
     this.ship = { ...ship };
     this.station = station;
+    this.debug = debug;
     this.credits = 0;
     this.newRun();
   }
@@ -33,7 +42,7 @@ export class Game {
   // between simulation steps.
   tryFire() {
     if (this.fireCooldown > 0 || this.ammo <= 0) return false;
-    this.ammo--;
+    if (!this.debug.unlimitedAmmo) this.ammo--;
     this.fireCooldown = this.ship.fireInterval;
     return true;
   }
@@ -43,8 +52,8 @@ export class Game {
     this.fireCooldown -= dt;
     const controls = new Set(keys);
     this.thrusting = controls.has('KeyW') && this.fuel > 0;
-    if (this.thrusting) this.fuel = Math.max(0, this.fuel - this.ship.fuelPerSecond * dt);
-    else controls.delete('KeyW');
+    if (!this.thrusting) controls.delete('KeyW');
+    else if (!this.debug.unlimitedFuel) this.fuel = Math.max(0, this.fuel - this.ship.fuelPerSecond * dt);
     const fire = keys.has('Space') && this.tryFire();
     return { controls, fire };
   }

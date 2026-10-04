@@ -2,9 +2,9 @@ import * as THREE from './vendor/three.module.js';
 import { makeAsteroid, randomGenerator, onSegment, rotate, triangulate } from './fracture.js?v=20261004';
 import { Simulation, STEP } from './physics.js?v=20261004';
 import { FracturePlanner } from './fracture-planner.js?v=20261004';
-import { Game, payout } from './game.js?v=20261004';
+import { Game, payout, stepGame } from './game.js?v=20261004';
 import { placeOre } from './ore.js?v=20261004';
-import { ORE, STATION, POLES } from './config.js?v=20261004';
+import { ORE, STATION, POLES, DEBUG } from './config.js?v=20261004';
 import { updateHud, showEvent, describeBlast } from './hud.js?v=20261004';
 
 const status = document.querySelector('#status');
@@ -25,9 +25,12 @@ const rockMaterial = new THREE.MeshBasicMaterial({ map: createRockTexture(), col
 const borderMaterial = new THREE.LineBasicMaterial({ color: 0xadc1c9, transparent: true, opacity: .45 });
 const oreMaterial = new THREE.MeshBasicMaterial({ color: 0xd8a93f });
 const oreEdgeMaterial = new THREE.LineBasicMaterial({ color: 0xffe7a1 });
+// Debug view of buried ore, drawn over the rock.
+const hiddenOreMaterial = new THREE.MeshBasicMaterial({ color: 0xff5fd2, transparent: true, opacity: .35, depthTest: false });
+const hiddenOreEdgeMaterial = new THREE.LineBasicMaterial({ color: 0xff8fe0, depthTest: false });
 const cutMaterial = new THREE.LineBasicMaterial({ color: 0x59efb9, transparent: true, opacity: .9, depthTest: false });
 const rockVisuals = new Map();
-let simulation, fracturePlanner, paused = false, showCuts = false, followShip = false, zoom = 1, accumulator = 0, last = 0;
+let simulation, fracturePlanner, paused = false, showCuts = false, showOre = DEBUG.showOre, followShip = false, zoom = 1, accumulator = 0, last = 0;
 const game = new Game();
 let blastSerial = 0, grabSerial = 0, telemetryTime = 0;
 const keys = new Set(), particles = [], flashes = [];
@@ -83,16 +86,18 @@ function createRockVisual(entity) {
   const cutGeometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(cuts, 3));
   const cutLines = new THREE.LineSegments(cutGeometry, cutMaterial); cutLines.visible = showCuts; cutLines.renderOrder = 1; content.add(cutLines);
   // Ore stays hidden inside the rock until enough of it has been exposed.
-  const oreGeometries = [];
+  // The debug view draws buried nuggets too.
+  const oreGeometries = [], hiddenOre = new THREE.Group();
+  hiddenOre.visible = showOre; hiddenOre.renderOrder = 2; content.add(hiddenOre);
   for (const ore of entity.ores) {
-    if (!ore.revealed) continue;
     const fill = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(triangulate(ore.shape).flat().flatMap(p => [p.x, p.y, .25]), 3));
     const edge = new THREE.BufferGeometry().setFromPoints(ore.shape[0].map(p => new THREE.Vector3(p.x, p.y, .35)));
-    content.add(new THREE.Mesh(fill, oreMaterial), new THREE.LineLoop(edge, oreEdgeMaterial));
+    if (ore.revealed) content.add(new THREE.Mesh(fill, oreMaterial), new THREE.LineLoop(edge, oreEdgeMaterial));
+    else hiddenOre.add(new THREE.Mesh(fill, hiddenOreMaterial), new THREE.LineLoop(edge, hiddenOreEdgeMaterial));
     oreGeometries.push(fill, edge);
   }
   rockLayer.add(group);
-  rockVisuals.set(entity, { group, geometry, cutLines, edgeGeometry, cutGeometry, oreGeometries });
+  rockVisuals.set(entity, { group, geometry, cutLines, edgeGeometry, cutGeometry, oreGeometries, hiddenOre });
 }
 function removeRockVisual(entity, visual) {
   rockLayer.remove(visual.group); visual.geometry.dispose(); visual.edgeGeometry.dispose(); visual.cutGeometry.dispose();
@@ -306,6 +311,13 @@ document.addEventListener('visibilitychange', () => { keys.clear(); accumulator 
 window.addEventListener('wheel', event => { event.preventDefault(); zoom = Math.max(.35, Math.min(2, zoom * Math.exp(-event.deltaY * .001))); resize(); }, { passive: false });
 document.querySelector('#reset').addEventListener('click', event => { reset(); event.currentTarget.blur(); });
 document.querySelector('#pause').addEventListener('click', event => { togglePause(); event.currentTarget.blur(); });
+const oreButton = document.querySelector('#ore');
+oreButton.setAttribute('aria-pressed', String(showOre));
+oreButton.addEventListener('click', event => {
+  showOre = !showOre; event.currentTarget.setAttribute('aria-pressed', String(showOre));
+  for (const visual of rockVisuals.values()) visual.hiddenOre.visible = showOre;
+  event.currentTarget.blur();
+});
 document.querySelector('#cuts').addEventListener('click', event => {
   showCuts = !showCuts; event.currentTarget.setAttribute('aria-pressed', String(showCuts));
   for (const visual of rockVisuals.values()) visual.cutLines.visible = showCuts;
@@ -323,10 +335,8 @@ function frame(time) {
   if (!paused) {
     accumulator += dt * 1000;
     while (accumulator >= STEP) {
-      const { controls, fire } = game.update(keys, STEP / 1000);
-      if (fire) simulation.fire();
       try {
-        simulation.step(controls);
+        stepGame(game, simulation, keys, STEP / 1000);
       } catch (error) {
         paused = true; updatePauseButton();
         status.textContent = `Fracture calculation failed: ${error.message}`;

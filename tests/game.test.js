@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import { Game, SHIP, payout } from '../game.js';
 import { ECONOMY, STATION } from '../config.js';
 
+// The rules as played: consumption on, whatever the development switches say.
+const RULES = { unlimitedFuel: false, unlimitedAmmo: false };
+
 const { fireInterval: FIRE_INTERVAL, fuelPerSecond: FUEL_PER_SECOND } = SHIP;
 
 const STEP = 1 / 120;
 
 test('a new run starts with full tanks, full hull and an empty hold', () => {
-  const game = new Game();
+  const game = new Game(SHIP, STATION, RULES);
   assert.equal(game.fuel, SHIP.fuelCapacity);
   assert.equal(game.ammo, SHIP.ammoCapacity);
   assert.equal(game.hull, SHIP.hullMax);
@@ -16,7 +19,7 @@ test('a new run starts with full tanks, full hull and an empty hold', () => {
 });
 
 test('thrust burns fuel and stops reaching the ship when the tank is empty', () => {
-  const game = new Game({ ...SHIP, fuelCapacity: 1 });
+  const game = new Game({ ...SHIP, fuelCapacity: 1 }, STATION, RULES);
   const keys = new Set(['KeyW', 'KeyA']);
   let result = game.update(keys, STEP);
   assert.ok(result.controls.has('KeyW'));
@@ -30,13 +33,13 @@ test('thrust burns fuel and stops reaching the ship when the tank is empty', () 
 });
 
 test('coasting and turning burn no fuel', () => {
-  const game = new Game();
+  const game = new Game(SHIP, STATION, RULES);
   for (let i = 0; i < 120; i++) game.update(new Set(['KeyA']), STEP);
   assert.equal(game.fuel, SHIP.fuelCapacity);
 });
 
 test('a held trigger fires at the fire interval and spends one round per shot', () => {
-  const game = new Game();
+  const game = new Game(SHIP, STATION, RULES);
   const keys = new Set(['Space']);
   let shots = 0;
   const steps = Math.round(2 / STEP);
@@ -46,7 +49,7 @@ test('a held trigger fires at the fire interval and spends one round per shot', 
 });
 
 test('a tap fires at once but not again within the cooldown', () => {
-  const game = new Game();
+  const game = new Game(SHIP, STATION, RULES);
   assert.ok(game.tryFire());
   assert.ok(!game.tryFire());
   game.update(new Set(), FIRE_INTERVAL);
@@ -54,7 +57,7 @@ test('a tap fires at once but not again within the cooldown', () => {
 });
 
 test('an empty magazine stops firing', () => {
-  const game = new Game({ ...SHIP, ammoCapacity: 2 });
+  const game = new Game({ ...SHIP, ammoCapacity: 2 }, STATION, RULES);
   let shots = 0;
   for (let i = 0; i < 600; i++) if (game.update(new Set(['Space']), STEP).fire) shots++;
   assert.equal(shots, 2);
@@ -62,7 +65,7 @@ test('an empty magazine stops firing', () => {
 });
 
 test('a new run refills the ship and keeps credits', () => {
-  const game = new Game();
+  const game = new Game(SHIP, STATION, RULES);
   game.update(new Set(['KeyW', 'Space']), 1);
   game.collect({ oreArea: 10, rockArea: 5 });
   game.credits = 250;
@@ -74,7 +77,7 @@ test('a new run refills the ship and keeps credits', () => {
 });
 
 test('the hold takes ore and the rock stuck to it until it is full', () => {
-  const game = new Game({ ...SHIP, cargoCapacity: 300 });
+  const game = new Game({ ...SHIP, cargoCapacity: 300 }, STATION, RULES);
   assert.ok(game.collect({ oreArea: 150, rockArea: 50 }));
   assert.equal(game.cargoMass, 200);
   assert.ok(!game.collect({ oreArea: 90, rockArea: 20 }), 'too big for the space left');
@@ -88,7 +91,7 @@ test('delivered ore pays by its area; attached rock pays nothing', () => {
 });
 
 test('docking slowly inside the ring sells the cargo once and refills the ship', () => {
-  const game = new Game();
+  const game = new Game(SHIP, STATION, RULES);
   game.collect({ oreArea: 200, rockArea: 40 });
   game.update(new Set(['KeyW', 'Space']), 1);
   assert.equal(game.updateDocking(STATION.radius + 1, 0), null, 'outside the ring');
@@ -106,10 +109,20 @@ test('docking slowly inside the ring sells the cargo once and refills the ship',
 });
 
 test('docking also sells the ore carried on the poles', () => {
-  const game = new Game();
+  const game = new Game(SHIP, STATION, RULES);
   game.collect({ oreArea: 100, rockArea: 0 });
   const sale = game.updateDocking(0, 0, [{ oreArea: 300, rockArea: 900 }]);
   assert.equal(sale.items, 2);
   assert.equal(sale.credits, payout({ oreArea: 400 }));
   assert.equal(game.credits, sale.credits);
+});
+
+test('debug switches stop fuel and ammo consumption', () => {
+  const game = new Game(SHIP, STATION, { unlimitedFuel: true, unlimitedAmmo: true });
+  let shots = 0;
+  for (let i = 0; i < 240; i++) if (game.update(new Set(['KeyW', 'Space']), 1 / 120).fire) shots++;
+  assert.ok(shots > 1, 'the fire interval still applies');
+  assert.ok(game.thrusting);
+  assert.equal(game.fuel, SHIP.fuelCapacity);
+  assert.equal(game.ammo, SHIP.ammoCapacity);
 });

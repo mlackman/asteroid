@@ -53,3 +53,10 @@ export const STATION = {
   radius: 70,              // docking ring
   maxDockSpeed: 25         // must be slower than this to dock
 };
+
+// Development switches.
+export const DEBUG = {
+  showOre: false,          // start with buried ore drawn (toggle with SHOW ORE)
+  unlimitedFuel: true,     // thrust burns no fuel
+  unlimitedAmmo: true      // firing spends no rounds
+};
