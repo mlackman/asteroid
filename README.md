@@ -37,6 +37,10 @@ The asteroid starts as one polygon with no predefined fragments. Every body owns
 its current outline, including concave edges and any holes. A bullet records its
 surface entry and drills to a random depth of 14–34 world units, stopping earlier
 at the first cavity. Its entry-to-detonation path becomes a shared fracture edge.
+Rock at the bottom of a pit has been crushed by earlier blasts and stops a round
+sooner: the drill depth shrinks with how enclosed the entry point is (the share
+of outward directions that meet rock again within 80 world units), so repeated
+shots into one spot deepen a pit by roughly 10 world units each.
 
 If the rock along its path is thinner than the drill depth, the round passes
 through. It leaves the far side at half speed and detonates about 8 world units
@@ -47,19 +51,28 @@ nothing. The blast also pushes rocks within 60 world units, less with distance
 and with size. A rock in the way before the fuse runs out takes the round instead.
 
 A round that stops inside a body detonates there, and the result depends on how
-large the blast is compared with that body. On a large body, the blast digs a
-rough crater bowl. Its rim lies on the actual rock surface and its floor a
-little beyond the detonation point, so the bowl is 2.5–3.5 times wider than it
-is deep, with walls meeting the surface at roughly 35–55 degrees. Its 12–16
-corners are spaced unevenly and crowd toward the rim, where the wall is
-steepest, so no wall is one long straight edge; the two sides of a bowl differ
-in width by up to about 30%. Like a buried charge breaking out toward the
-nearest free surface, the bowl faces along the inward surface normal at the
-entry point rather than along the bullet. The entry point must stay inside the
-rim: a grazing round stretches the bowl on its entry side, up to 3.5 times its
-depth, like an oblique impact crater, and only beyond that does the bowl tilt
-toward the bullet. The bowl stays convex to avoid hooks that mechanically trap
-pieces.
+large the blast is compared with that body. The blast's reach comes from the
+round (20–35 world units), not from how deep it got. On a large body it digs a
+rough crater. Like a buried charge, it breaks out along its line of least
+resistance: rays from the detonation point find the direction to the nearest
+open space, averaging the shortest few so that a small facet of a rough floor
+does not mislead it. The crater faces that way rather than along the bullet.
+
+The crater is the rock that lies outward of a rough floor curve and reaches open
+space within the blast's reach moving straight out along the crater's axis.
+The floor is a bowl 2.5–3.5 times wider than the blast reaches, slightly
+lopsided, with a few broad steps and small ledges across 18–24 unevenly spaced
+columns; it lies a little beyond the detonation point, less far in crushed rock.
+Every point outward of a crater point, up to the open space, is also in the
+crater, so the crater can always slide straight out without touching the rock
+left behind: no overhang can trap a piece, however rough the walls. The reach
+limit keeps a blast at the bottom of a hole from shearing off the hole's walls
+far above it, while in a shallow pit it takes part of the rim with it. Both
+conditions are computed exactly with polygon operations, and a crater that
+still could not start to slide out is rejected and tried smaller. The entry
+point must lie well inside the crater: a grazing round stretches the crater on
+its entry side, up to 3.5 times the blast's reach, like an oblique impact
+crater, and only beyond that does the crater tilt toward the bullet.
 The bullet line first splits it into two sides; optional angled polylines
 subdivide either side into uneven chunks. Radius, corner positions, cut angles
 and chunk proportions vary between blasts. Extra cuts are skipped if they would
@@ -74,9 +87,10 @@ them, breaking off larger pieces beside the crater chips. The intact asteroid's
 walls are far too thick for this; a medium fragment often cracks, and an
 asteroid worn thin between old cavities occasionally does.
 
-If the crater would take out more than 40% of the body, the blast is too large
-for it and the whole body shatters into 2–4 wedges around the detonation point,
-more for larger bodies. The first crack runs to the nearest free surface and
+A body less than 1.75 times the blast's reach across, or one the crater would
+take more than 30% of, is too small for the blast: it shatters into 2–4 wedges
+around the detonation point, more for larger bodies. A charge within 3 world
+units of the surface vents into space instead and never shatters a body. The first crack runs to the nearest free surface and
 the others divide the circle roughly evenly. Freshly released fragments usually
 shatter when a round stops inside them.
 
@@ -110,9 +124,14 @@ wall pieces sit behind the crater and get a gentler push. Crater chips leave
 along the bowl's axis, so angled hits throw debris away from the
 surface rather than back along the bullet. On top of a shared 12–14 world units
 per second drift, each piece gets an expansion proportional to its offset from
-the detonation point, so the pieces fan out over roughly 25–40 degrees; the
-bowl's sloping walls leave them room to. Because this is a linear
-velocity field, every pair of siblings moves apart; no trajectories cross.
+the detonation point, so the pieces fan out over roughly 25–45 degrees. Because
+this is a linear velocity field, every pair of siblings moves apart; no
+trajectories cross. The planner slides each chip along its intended direction
+and scales back its sideways spread (to half, or none) if a curved chip would
+swing its far end into the crater rim on its way out; a broken-off wall piece
+that would hit the rock around it leaves along the crater's axis instead. Two
+pieces that hook around each other, so that no direction separates them, are
+merged into one.
 There are no ongoing release forces.
 
 Collisions are never switched off. New pieces start exactly touching their
@@ -120,7 +139,8 @@ neighbors along the cracks the blast created, so the fracture planner records
 every shared edge between the new bodies, with its outward normal. Before the
 launch impulses are applied, a small velocity solve adjusts them until every
 shared edge, against the parent and between siblings, opens at no less than
-1 world unit per second. The parent's recoil and spin are part of that check.
+1 world unit per second. A crater wall running along the exit direction can
+only slide past the piece beside it, so it is only required not to close. The parent's recoil and spin are part of that check.
 Pairwise adjustments are equal and opposite, so momentum is still conserved; in
 practice launches change by a few percent at most. Since every crack opens, no
 piece can pass into another or back into its source.
@@ -154,8 +174,9 @@ cannot be destroyed, and extremely small pieces stop splitting for stability.
 node --test tests/*.test.js
 ```
 
-Tests cover complementary cuts, a rough crater bowl wider than deep with no long
-straight wall,
+Tests cover complementary cuts, a rough crater wider than deep with no long
+straight wall, repeated shots into one spot that keep breaking rock while the
+pit deepens slowly,
 rounds that pass through a piece cracking only the rock they crossed and
 detonating outside it, blasts that shatter small bodies, crack thin walls of
 medium ones and only crater large ones,
@@ -169,7 +190,8 @@ outward launches with varied speed and a delayed tumble, unforced coasting, sibl
 launches that never converge, debris thrown toward the surface normal on angled hits, independent movement and passive collision
 energy across 20 seeded blasts, every shared crack opening at release, collisions
 with the parent and siblings from the moment of release, no visible overlap
-between any rocks across repeated shots into earlier debris, a centered elastic
+between any rocks deeper than the colliders' hairline clearance across repeated
+shots into earlier debris, a centered elastic
 rebound, and constant displacement after an overlap correction ends.
 Contact displacement is checked across ten troublesome seeded blasts with
 rotating fragments; sustained thrust and turning retain their acceleration.

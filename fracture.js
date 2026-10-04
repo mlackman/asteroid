@@ -160,6 +160,8 @@ function fromCoordinates(multiPolygon) {
   })).filter(shape => shape[0].length >= 3 && shapeArea(shape) > 1e-8);
 }
 function intersection(shape, mask) { return fromCoordinates(clipping.intersection(toCoordinates(shape), toCoordinates(mask))); }
+// The parts of a shape inside a mask, as separate shapes.
+export const clip = intersection;
 function difference(shape, pieces) { return fromCoordinates(clipping.difference(toCoordinates(shape), pieces.map(toCoordinates))); }
 export function insetShape(shape, clearance) {
   // Subtract a narrow strip around every boundary, including hole boundaries.
@@ -183,22 +185,50 @@ function extent(shape, center) {
 function inBlastFrame(center, direction, side, forward, across) {
   return { x: center.x + direction.x * forward + side.x * across, y: center.y + direction.y * forward + side.y * across };
 }
-// A rough crater bowl. Its rim lies on the rock surface `surface` units behind
-// the detonation point and its floor `floor` units beyond it, so the round sits
-// near the bottom of a bowl that is several times wider than it is deep. Each
-// side has its own width, and corners run up both walls to the rim.
-function blastFootprint(center, direction, side, surface, floor, profile, reach) {
-  const depth = surface + floor;
-  const halfWidth = u => depth * (u < 0 ? profile.left : profile.right);
-  const contour = profile.points.map(({ u, scale }) => inBlastFrame(center, direction, side, -surface + depth * (1 - u * u) * scale, u * halfWidth(u)));
-  // Past the rim the walls keep their slope out through the exterior, so the
-  // bowl cuts cleanly through an uneven surface.
-  for (const u of [-1, 1]) {
-    const flare = halfWidth(u) / (2 * depth);
-    contour.push(inBlastFrame(center, direction, side, -surface - reach, u * (halfWidth(u) + reach * flare)));
-  }
-  // Keep the pocket convex: inward hooks can mechanically trap matching pieces.
-  return [hull(contour)];
+// A crater is the rock a blast can throw clear. In the crater's frame
+// (`forward` along its axis into the rock, `across` sideways) it is the rock
+// that lies outward of a rough floor curve and reaches open space within
+// `reach` units moving straight out along the axis. Both conditions hold for
+// every point outward of a crater point up to the open space, so the crater
+// can always slide straight out without touching the rock left behind. The
+// reach limit stops a blast at the bottom of a hole from shearing off the
+// hole's walls far above it; in a shallow pit it takes the rim with it.
+function craterRegion(shape, center, axis, entry, size, profile) {
+  const side = { x: -axis.y, y: axis.x }, out = { x: -axis.x, y: -axis.y };
+  const d = sub(entry, center), e = { forward: d.x * axis.x + d.y * axis.y, across: d.x * side.x + d.y * side.y };
+  // The crater reaches at least from the open surface to just past the
+  // charge; a shallow charge in a pit still throws out a full-width crater.
+  const box = extent(shape, center) + 10;
+  const bowl = size.floor + Math.max(size.radius, solidDistance(shape, center, out, box)), reach = 1.3 * bowl;
+  const floorAt = (u, coarse, fine) => {
+    const across = u * bowl * (u < 0 ? profile.left : profile.right);
+    let floor = size.floor - bowl * u * u + bowl * (coarse * .15 + fine * .06) * Math.max(0, 1 - u * u);
+    // Roughness never pulls the floor up to the charge: the blast breaks
+    // rock beyond itself.
+    if (Math.abs(across) < .3 * bowl) floor = Math.max(floor, size.floor * .8);
+    // The drill path from the entry to the detonation point stays inside.
+    if (Math.abs(across) < 2) floor = Math.max(floor, 1);
+    if (across * e.across > 0 && Math.abs(across) <= Math.abs(e.across)) floor = Math.max(floor, e.forward * across / e.across + 1);
+    return inBlastFrame(center, axis, side, floor, across);
+  };
+  // Outward of the floor: the floor curve, closed far out in open space.
+  const floor = profile.columns.map(c => floorAt(c.u, c.coarse, c.fine));
+  const first = profile.columns[0], last = profile.columns.at(-1), far = -box;
+  const beyond = (c, f) => { const p = floorAt(c.u, 0, 0), q = sub(p, center); return inBlastFrame(center, axis, side, far, (q.x * side.x + q.y * side.y) * f); };
+  const outward = [[...floor, beyond(last, 1.5), beyond(first, 1.5)]];
+  // Rock within `reach` of open space along the axis: open space near the
+  // blast swept inward by `reach`.
+  // Only open space within reach of the crater can matter.
+  const local = Math.min(box, 2.5 * bowl + reach);
+  const near = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, y]) => ({ x: center.x + x * local, y: center.y + y * local }));
+  const open = difference([near], [shape]);
+  const step = { x: axis.x * reach, y: axis.y * reach }, moved = ring => ring.map(p => ({ x: p.x + step.x, y: p.y + step.y }));
+  const sweeps = open.flatMap(piece => [piece, piece.map(moved), ...piece.flatMap(ring => ring.map((a, i) => {
+    const b = ring[(i + 1) % ring.length];
+    return Math.abs(cross(sub(b, a), step)) < 1e-9 ? null : [[a, b, { x: b.x + step.x, y: b.y + step.y }, { x: a.x + step.x, y: a.y + step.y }]];
+  }).filter(Boolean))]);
+  const reachable = fromCoordinates(clipping.union(...sweeps.map(toCoordinates)));
+  return intersection(shape, outward).flatMap(piece => reachable.flatMap(zone => intersection(piece, zone)));
 }
 function facetedCutMask(center, direction, side, span, offset, curve, reach) {
   const contour = [inBlastFrame(center, direction, side, -reach, offset - curve.tilt / 2)];
@@ -245,27 +275,6 @@ function splitThrough(shape, center, direction) {
   ]];
   return [...intersection(shape, mask(1)), ...intersection(shape, mask(-1))];
 }
-// Outward normal of the outline near a surface point, averaged over the edges
-// within a few units so one jagged facet does not swing the result. Returns
-// null when the point is not on this shape's outline.
-export function surfaceNormal(shape, point, radius = 4) {
-  let sum = { x: 0, y: 0 }, nearest = Infinity;
-  for (const ring of shape) {
-    for (let i = 0; i < ring.length; i++) {
-      const a = ring[i], edge = sub(ring[(i + 1) % ring.length], a), edgeLength = length(edge);
-      if (!edgeLength) continue;
-      const t = Math.max(0, Math.min(1, ((point.x - a.x) * edge.x + (point.y - a.y) * edge.y) / edgeLength ** 2));
-      const distance = length(sub(point, { x: a.x + edge.x * t, y: a.y + edge.y * t }));
-      nearest = Math.min(nearest, distance);
-      if (distance > radius) continue;
-      const n = { x: edge.y / edgeLength, y: -edge.x / edgeLength };
-      const probe = { x: a.x + edge.x / 2 + n.x * .01, y: a.y + edge.y / 2 + n.y * .01 };
-      const sign = contains(shape, probe) ? -1 : 1, weight = Math.min(edgeLength, radius);
-      sum = { x: sum.x + n.x * sign * weight, y: sum.y + n.y * sign * weight };
-    }
-  }
-  return nearest > 1 || length(sum) < 1e-9 ? null : normalize(sum);
-}
 // Edges that pieces of one fracture share. Each entry gives the outward normal
 // of piece b's edge, pointing into piece a, and the shared segment's midpoint.
 // Separating the pair without either passing through the other requires a's
@@ -293,6 +302,11 @@ export function sharedBoundaries(shapes, tolerance = 1e-6) {
     }
   }
   return contacts;
+}
+// Visible overlap between two shapes after sliding `moving` by `offset`.
+export function overlapAfter(moving, offset, fixed) {
+  const moved = moving.map(ring => ring.map(p => ({ x: p.x + offset.x, y: p.y + offset.y })));
+  return intersection(moved, fixed).reduce((sum, piece) => sum + shapeArea(piece), 0);
 }
 function pointSegmentDistance(p, a, b) {
   const d = sub(b, a), l2 = d.x * d.x + d.y * d.y;
@@ -328,6 +342,26 @@ function crackLine(from, direction, start, distance, random) {
   }
   points.push({ x: from.x + direction.x * (start + distance + 2), y: from.y + direction.y * (start + distance + 2) });
   return points;
+}
+// Two touching pieces can slide apart only if some direction opens every
+// crack between them: all the cracks' normals must fit in one half-plane.
+// A piece hooked around its neighbour fails this.
+function slideApart(a, b) {
+  const angles = sharedBoundaries([a, b]).map(({ normal }) => Math.atan2(normal.y, normal.x)).sort((x, y) => x - y);
+  if (angles.length < 2) return true;
+  const gaps = angles.map((angle, i) => (i ? angle - angles[i - 1] : angle + Math.PI * 2 - angles.at(-1)));
+  return Math.max(...gaps) > Math.PI + 1e-6;
+}
+// Merge any pair of pieces that cannot slide apart.
+function unhook(pieces) {
+  const result = [...pieces];
+  for (let i = 0; i < result.length; i++) for (let j = i + 1; j < result.length; j++) {
+    if (slideApart(result[i], result[j])) continue;
+    const merged = fromCoordinates(clipping.union(toCoordinates(result[i]), toCoordinates(result[j])));
+    if (merged.length !== 1) continue;
+    result.splice(j, 1); result[i] = merged[0]; i = -1; break;
+  }
+  return result;
 }
 function conservesArea(area, pieces) {
   return Math.abs(pieces.reduce((sum, piece) => sum + shapeArea(piece), 0) - area) <= 1e-5;
@@ -383,7 +417,19 @@ function wallCracks(shape, cap, center, axis, radius, random) {
   }
   return chosen.slice(0, 2).map(({ direction, inPocket, wall }) => crackLine(center, direction, Math.max(0, inPocket - .5), wall + .5, random));
 }
-export function fractureShape(shape, entry, center, direction, random = Math.random, through = false) {
+// How enclosed a surface point is: the share of outward directions, within
+// 80 degrees of `outward`, that meet rock again within `range`. An open
+// surface scores 0; the bottom of a deep, narrow hole approaches 1.
+export function confinement(shape, point, outward, range = 80) {
+  const from = { x: point.x + outward.x * .5, y: point.y + outward.y * .5 };
+  let blocked = 0;
+  for (let i = 0; i <= 16; i++) {
+    const direction = rotate(outward, (i / 16 - .5) * Math.PI * 8 / 9);
+    if (segmentHit(shape, from, { x: from.x + direction.x * range, y: from.y + direction.y * range }) !== Infinity) blocked++;
+  }
+  return blocked / 17;
+}
+export function fractureShape(shape, entry, center, direction, random = Math.random, through = false, enclosed = 0) {
   const area = shapeArea(shape);
   const unchanged = { retained: [shape], fragments: [], mode: 'none' };
   if (area < MIN_PIECE_AREA * 2) return unchanged;
@@ -391,48 +437,68 @@ export function fractureShape(shape, entry, center, direction, random = Math.ran
   const drillDirection = length(sub(center, entry)) > 1e-5 ? normalize(sub(center, entry)) : normalize(direction);
   const side = { x: -drillDirection.y, y: drillDirection.x };
   const depth = length(sub(center, entry)), reach = extent(shape, center) * 6 + 10;
-  // The bowl is 2.5–3.5 times wider than deep, a little lopsided, with 12–16
-  // corners from rim to rim. Corners crowd toward the rim, where the wall is
-  // steepest, and are unevenly spaced. They stay on the convex curve, since
-  // a corner pushed inward would be dropped and leave a long straight wall.
-  const corners = 12 + Math.floor(random() * 5), width = 1.25 + random() * .5;
-  const profile = { left: width * (.85 + random() * .3), right: width * (.85 + random() * .3), points: [] };
-  for (let i = 0; i <= corners; i++) {
-    const v = -1 + (2 * i + (i > 0 && i < corners ? (random() - .5) * .8 : 0)) / corners;
-    profile.points.push({ u: (v + Math.sin(v * Math.PI / 2)) / 2, scale: 1 });
+  // A rough, slightly lopsided crater 2.5–3.5 times wider than its blast
+  // reaches. Its floor follows a bowl, with a few broad steps and small
+  // ledges on top, across 18–24 unevenly spaced columns.
+  const count = 18 + Math.floor(random() * 7), width = 1.25 + random() * .5;
+  const steps = Array.from({ length: 5 }, () => random() * 2 - 1);
+  const profile = { left: width * (.85 + random() * .3), right: width * (.85 + random() * .3), columns: [] };
+  for (let i = 0; i <= count; i++) {
+    const v = -1 + (2 * i + (i > 0 && i < count ? (random() - .5) * .7 : 0)) / count;
+    const t = (v + 1) / 2 * (steps.length - 1), k = Math.min(steps.length - 2, Math.floor(t));
+    // Columns run a little past the rim, so the crater's ends sit in open space.
+    profile.columns.push({ u: 1.1 * (v + Math.sin(v * Math.PI / 2)) / 2, coarse: steps[k] + (steps[k + 1] - steps[k]) * (t - k), fine: random() * 2 - 1 });
   }
-  let radius = depth * (.85 + random() * .7), floor = radius * (.25 + random() * .15), scale = 1, cap = null, axis = drillDirection;
-  // A buried charge breaks out toward the nearest free surface, so the bowl
-  // turns from the drill line toward the inward surface normal, as far as the
-  // entry point stays inside its rim. The whole drill path then lies inside
-  // the crater and remains a fracture.
-  const normal = surfaceNormal(shape, entry);
-  const turn = normal ? Math.atan2(cross(drillDirection, { x: -normal.x, y: -normal.y }), -(drillDirection.x * normal.x + drillDirection.y * normal.y)) : 0;
-  // Keep the crater connected to the surface and local to this
-  // impact, including when an earlier shot has left a nearby cavity. A pocket
-  // that would take out a large share of the body means the blast is too big
-  // for it: the whole body shatters instead.
+  // The blast's reach comes from the round, not from how deep it got. In
+  // crushed rock at the bottom of a pit the floor breaks less far past it.
+  let radius = 20 + random() * 15, scale = 1, cap = null, axis = drillDirection;
+  const size = { radius, floor: radius * (.25 + random() * .15) * (1 - .8 * enclosed) };
+  // A buried charge breaks out along its line of least resistance, toward the
+  // nearest free surface, so the crater faces that way rather than along the
+  // bullet. Rays from the detonation point find it; averaging the shortest
+  // ones ignores small facets of a rough crater floor.
+  const rays = Array.from({ length: 72 }, (_, i) => {
+    const direction = { x: Math.cos(i / 72 * Math.PI * 2), y: Math.sin(i / 72 * Math.PI * 2) };
+    return { direction, distance: solidDistance(shape, center, direction, reach) };
+  });
+  const nearest = Math.min(...rays.map(ray => ray.distance));
+  const outward = normalize(rays.filter(ray => ray.distance <= nearest * 1.15 + .5).reduce((sum, { direction }) => ({ x: sum.x + direction.x, y: sum.y + direction.y }), { x: 0, y: 0 }));
+  const turn = Math.atan2(cross(drillDirection, { x: -outward.x, y: -outward.y }), -(drillDirection.x * outward.x + drillDirection.y * outward.y));
+  // Keep the crater local to this impact. A body less than 1.75 times the
+  // blast's reach across, or one the crater would take 30% of, is too small
+  // for the blast and shatters, unless the charge sits so close to the
+  // surface that it vents into space.
   for (let attempt = 0; attempt < 7; attempt++) {
-    // The entry point lies depth·sin(turn) from the bowl's axis and must stay
-    // well inside the rim. A grazing round stretches the bowl on its entry
-    // side, up to 3.5 times its depth, like an oblique impact crater; beyond
-    // that the bowl turns less.
-    const surfaceAt = a => { const back = rotate(drillDirection, a); return solidDistance(shape, center, { x: -back.x, y: -back.y }, reach); };
+    // The entry point must lie well inside the crater's width. A grazing
+    // round stretches the crater on its entry side, up to 3.5 times the
+    // blast's reach, like an oblique impact crater; beyond that the crater
+    // turns less.
     let tilt = turn, shaped = null;
     for (let k = 4; k >= 0 && !shaped; k--) {
       tilt = turn * k / 4;
-      const bowl = surfaceAt(tilt) + floor * scale, needed = depth * Math.abs(Math.sin(tilt)) / .8 / bowl;
-      // Positive turns put the entry on the bowl's left (negative across) side.
-      const entrySide = tilt > 0 ? 'left' : 'right';
+      const across = depth * Math.sin(tilt), needed = Math.abs(across) / .8 / (size.floor + size.radius);
+      // Entry offsets with positive `across` lie on the crater's right.
+      const entrySide = across > 0 ? 'right' : 'left';
       const widths = { left: profile.left * scale, right: profile.right * scale };
       if (needed <= Math.max(widths[entrySide], 3.5) || k === 0) shaped = { ...profile, ...widths, [entrySide]: Math.max(widths[entrySide], Math.min(needed, 3.5)) };
     }
     axis = rotate(drillDirection, tilt);
-    const footprint = blastFootprint(center, axis, { x: -axis.y, y: axis.x }, surfaceAt(tilt), floor * scale, shaped, reach);
-    const candidates = intersection(shape, footprint);
+    const candidates = craterRegion(shape, center, axis, entry, size, shaped);
     cap = candidates.find(piece => contains(piece, center));
-    if (attempt === 0 && (!cap || shapeArea(cap) > area * .4)) return shatter(shape, center, area, random) || unchanged;
-    if (cap && shapeArea(cap) <= Math.min(5200, area * .4) && extent(cap, center) < 155) break;
+    if (attempt === 0 && nearest >= 3 && (Math.sqrt(area) < 1.75 * (size.floor + Math.max(radius, nearest)) || cap && shapeArea(cap) > area * .3)) return shatter(shape, center, area, random) || unchanged;
+    // The crater must start to slide straight out along its axis without
+    // touching the rock left behind. The straight outer edge between two
+    // sampled columns can clip a rim corner that sticks out between them,
+    // leaving rock on the crater's open side; such an attempt is rejected.
+    // Rock farther up a pit only deflects debris on its way out.
+    const out = { x: -axis.x, y: -axis.y };
+    const clear = () => {
+      // Only rock near the crater can be touched in the first few units.
+      const r = extent(cap, center) + 10, box = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, y]) => ({ x: center.x + x * r, y: center.y + y * r }));
+      const rest = intersection(shape, [box]).flatMap(piece => difference(piece, [cap]));
+      return [.5, 1.5, 4].every(t => rest.every(piece => overlapAfter(cap, { x: out.x * t, y: out.y * t }, piece) < .05));
+    };
+    if (cap && shapeArea(cap) <= Math.min(5200, area * .4) && extent(cap, center) < 155 && clear()) break;
     cap = null; radius *= .73; scale *= .8;
   }
   if (!cap || isSliver(cap)) return unchanged;
@@ -467,5 +533,5 @@ export function fractureShape(shape, entry, center, direction, random = Math.ran
   // Cuts close to existing cracks can amplify coordinate rounding. Decline
   // an ambiguous cut rather than accumulate missing material over many shots.
   if (!conservesArea(area, [...retained, ...fragments])) return unchanged;
-  return { retained, fragments, mode: 'chip', axis };
+  return { retained, fragments: unhook(fragments), mode: 'chip', axis };
 }

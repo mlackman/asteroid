@@ -1,4 +1,4 @@
-import { rotate, sub, cross, normalize, contains, segmentHit, solidDistance } from './fracture.js?v=20261003-release';
+import { rotate, sub, cross, normalize, contains, segmentHit, solidDistance, confinement } from './fracture.js?v=20261003-release';
 import { prepareRock, prepareFracture } from './rock-geometry.js?v=20261003-release';
 import { outline, pointClearance } from './clearance.js?v=20261003-release';
 const { Engine, Body, Composite, Resolver, Events } = globalThis.Matter;
@@ -131,7 +131,10 @@ export class Simulation {
     const materialVelocity = velocityAt(hit.entity.body, localToWorld(hit.entity, hit.local));
     const relativeVelocity = { x: bullet.velocity.x - materialVelocity.x * 60, y: bullet.velocity.y - materialVelocity.y * 60 };
     bullet.direction = rotate(normalize(relativeVelocity), -hit.entity.body.angle);
-    const depth = 14 + this.random() * 20;
+    // Rock at the bottom of a pit has been crushed by earlier blasts and stops
+    // a round sooner, so repeated shots into one spot deepen it slowly.
+    bullet.enclosed = confinement(hit.entity.shape, bullet.entry, { x: -bullet.direction.x, y: -bullet.direction.y });
+    const depth = (14 + this.random() * 20) * (1 - bullet.enclosed) ** 2;
     // A round that would come out the far side passes through: it drills to
     // the exit, leaves, and detonates just outside, cracking the rock along
     // its tunnel. Otherwise it stops at its depth or at the first cavity.
@@ -148,7 +151,7 @@ export class Simulation {
     const center = { x: bullet.local.x + bullet.direction.x * remaining, y: bullet.local.y + bullet.direction.y * remaining };
     const plan = { entity: bullet.entity, center, result: null, error: null };
     bullet.plan = plan;
-    const request = { shape: bullet.entity.shape, entry: bullet.entry, center, direction: bullet.direction, detached: bullet.entity.detached, through: bullet.through, seed: Math.floor(this.random() * 4294967296) };
+    const request = { shape: bullet.entity.shape, entry: bullet.entry, center, direction: bullet.direction, detached: bullet.entity.detached, through: bullet.through, enclosed: bullet.enclosed, seed: Math.floor(this.random() * 4294967296) };
     // Only publish readiness here. Bodies are replaced inside a fixed physics
     // step, using the parent's current pose rather than its pose when work began.
     Promise.resolve(this.fracturePlanner(request)).then(result => {
@@ -167,7 +170,7 @@ export class Simulation {
       if (!bullet.plan.result) return;
       fracture = bullet.plan.result;
     } else {
-      fracture = prepareFracture({ shape: entity.shape, entry: bullet.entry, center: bullet.local, direction: bullet.direction, detached: entity.detached, through: bullet.through }, this.random);
+      fracture = prepareFracture({ shape: entity.shape, entry: bullet.entry, center: bullet.local, direction: bullet.direction, detached: entity.detached, through: bullet.through, enclosed: bullet.enclosed }, this.random);
     }
     const center = localToWorld(entity, bullet.local);
     if (fracture.mode === 'none') {
@@ -202,17 +205,22 @@ export class Simulation {
     const launches = released.map(fragment => {
       const i = chips.indexOf(fragment);
       if (i >= 0) {
-        const a = (offsets[i].x * axis.x + offsets[i].y * axis.y) * along, c = (offsets[i].x * side.x + offsets[i].y * side.y) * across;
+        // The planner scales back the sideways fan for a chip whose far end
+        // would otherwise swing into the crater rim on its way out.
+        const a = (offsets[i].x * axis.x + offsets[i].y * axis.y) * along, c = (offsets[i].x * side.x + offsets[i].y * side.y) * across * (fracture.spread?.[i] ?? 1);
         return { x: (axis.x * (drift + a) + side.x * c) / 60, y: (axis.y * (drift + a) + side.y * c) / 60 };
       }
       // Pieces broken off by a wall crack, a shatter, or a tunnel split are
       // pushed away from the blast. Wall pieces sit behind the crater and get
       // a gentler push than the chips.
-      const direction = normalize(sub(fragment.body.position, center));
+      // A wall piece that would hit the rock around it moving that way leaves
+      // straight out along the crater's axis instead.
+      const radial = fracture.radial?.[remainders.indexOf(fragment)] ?? true;
+      const direction = radial ? normalize(sub(fragment.body.position, center)) : axis;
       const speed = fracture.mode === 'chip' ? 4 + this.random() * 4 : 10 + this.random() * 8;
       return { x: direction.x * speed / 60, y: direction.y * speed / 60 };
     });
-    this.separateLaunches([...remainders, ...fragments], released, launches, fracture.contacts || [], origin, angle);
+    this.separateLaunches([...remainders, ...fragments], released, launches, fracture.contacts || [], origin, angle, fracture.mode === 'chip' ? axis : null);
     let reaction = { x: 0, y: 0 }, torque = 0;
     for (const [i, fragment] of released.entries()) {
       // Kicks act at the center of mass. A spin now would swing a piece's
@@ -265,7 +273,7 @@ export class Simulation {
       }
     }
     this.explosions++;
-    this.lastBlast = { center: bullet.through ? { ...bullet.position } : center, count: fragments.length + Math.max(0, remainders.length - 1), depth: bullet.traveled, mode: fracture.mode };
+    this.lastBlast = { center: bullet.through ? { ...bullet.position } : center, count: fragments.length + Math.max(0, remainders.length - 1), depth: bullet.traveled, mode: fracture.mode, exit: fracture.mode === 'chip' ? axis : null };
     bullet.state = 'spent';
     if (bullet.through) this.pushOutside(bullet.position, [...remainders, ...fragments]);
   }
@@ -289,7 +297,7 @@ export class Simulation {
   // edge opens at a minimum rate, no piece can pass into another or into the
   // parent. Collisions stay enabled throughout. The parent's recoil and spin
   // follow from momentum conservation and are included in the check.
-  separateLaunches(bodies, released, launches, contacts, origin, angle) {
+  separateLaunches(bodies, released, launches, contacts, origin, angle, exit = null) {
     const parent = bodies.find(body => !released.includes(body)) || null;
     const index = new Map(released.map((entity, i) => [entity, i]));
     const toWorld = p => { const q = rotate(p, angle); return { x: origin.x + q.x, y: origin.y + q.y }; };
@@ -314,7 +322,11 @@ export class Simulation {
       let worst = 0;
       for (const { a, b, normal, point } of constraints) {
         const motion = parentMotion(), va = velocity(a, point, motion), vb = velocity(b, point, motion);
-        const gap = minimum - ((va.x - vb.x) * normal.x + (va.y - vb.y) * normal.y);
+        // A crater wall running along the exit direction can only slide past
+        // the piece beside it; it must not close, but it cannot open. Walls
+        // facing out of the crater open at the full rate.
+        const facing = exit && (a === parent || b === parent) ? Math.max(0, (normal.x * exit.x + normal.y * exit.y) * (b === parent ? 1 : -1)) : 1;
+        const gap = minimum * Math.min(1, facing * 4) - ((va.x - vb.x) * normal.x + (va.y - vb.y) * normal.y);
         if (gap <= 0) continue;
         worst = Math.max(worst, gap);
         // Equal and opposite impulses between two pieces; against the parent,
