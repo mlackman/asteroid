@@ -1,15 +1,19 @@
 // Run state and game rules. Independent of rendering and of the physics
 // engine: the game decides which controls reach the simulation, and the
-// simulation stays a pure physical model.
+// simulation stays a pure physical model. Tunables live in config.js.
+import { SHIP, ECONOMY, STATION } from './config.js?v=20261004';
+export { SHIP };
 
-export const SHIP = { fuelCapacity: 100, ammoCapacity: 60, hullMax: 100, cargoCapacity: 400 };
-export const FIRE_INTERVAL = .38;
-// Main-engine burn per second of thrust. Turning uses reaction wheels and is free.
-export const FUEL_PER_SECOND = 2.5;
+// What delivered material pays: ore value, less the station's fee for
+// cleaning off the rock still stuck to it. Never negative.
+export function payout({ oreArea, rockArea }, economy = ECONOMY) {
+  return Math.max(0, oreArea * economy.oreValue - rockArea * economy.cleaningFee);
+}
 
 export class Game {
-  constructor(ship = SHIP) {
+  constructor(ship = SHIP, station = STATION) {
     this.ship = { ...ship };
+    this.station = station;
     this.credits = 0;
     this.newRun();
   }
@@ -21,15 +25,16 @@ export class Game {
     this.cargo = [];
     this.fireCooldown = 0;
     this.thrusting = false;
+    this.docked = false;
   }
-  get cargoMass() { return this.cargo.reduce((sum, item) => sum + item.mass, 0); }
-  get cargoValue() { return this.cargo.reduce((sum, item) => sum + item.value, 0); }
+  get cargoMass() { return this.cargo.reduce((sum, item) => sum + item.oreArea + item.rockArea, 0); }
+  get cargoValue() { return this.cargo.reduce((sum, item) => sum + payout(item), 0); }
   // Fire on the press as well as while held: a brief tap must not disappear
   // between simulation steps.
   tryFire() {
     if (this.fireCooldown > 0 || this.ammo <= 0) return false;
     this.ammo--;
-    this.fireCooldown = FIRE_INTERVAL;
+    this.fireCooldown = this.ship.fireInterval;
     return true;
   }
   // Advance the rules by one simulation step. Returns the controls the ship may
@@ -38,9 +43,30 @@ export class Game {
     this.fireCooldown -= dt;
     const controls = new Set(keys);
     this.thrusting = controls.has('KeyW') && this.fuel > 0;
-    if (this.thrusting) this.fuel = Math.max(0, this.fuel - FUEL_PER_SECOND * dt);
+    if (this.thrusting) this.fuel = Math.max(0, this.fuel - this.ship.fuelPerSecond * dt);
     else controls.delete('KeyW');
     const fire = keys.has('Space') && this.tryFire();
     return { controls, fire };
+  }
+  // Take a scooped piece into the hold if it fits. Rock stuck to the ore
+  // takes space too.
+  collect(item) {
+    if (this.cargoMass + item.oreArea + item.rockArea > this.ship.cargoCapacity) return false;
+    this.cargo.push({ oreArea: item.oreArea, rockArea: item.rockArea });
+    return true;
+  }
+  // Called each frame with the ship's distance from the station and its speed.
+  // Arriving slowly inside the ring docks once: the cargo is sold and the
+  // ship refuelled and rearmed. Leaving the ring allows the next docking.
+  updateDocking(distance, speed) {
+    if (distance > this.station.radius) { this.docked = false; return null; }
+    if (this.docked || speed > this.station.maxDockSpeed) return null;
+    this.docked = true;
+    const sale = { items: this.cargo.length, credits: this.cargoValue };
+    this.credits += sale.credits;
+    this.cargo = [];
+    this.fuel = this.ship.fuelCapacity;
+    this.ammo = this.ship.ammoCapacity;
+    return sale;
   }
 }

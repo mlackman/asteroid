@@ -1,8 +1,23 @@
-import { shapeArea, shapeProperties, triangulate, insetShape, convexParts, fractureShape, minimumWidth, sharedBoundaries, overlapAfter, normalize, sub, clip } from './fracture.js?v=20261003-release';
+import { shapeArea, shapeProperties, triangulate, insetShape, convexParts, fractureShape, minimumWidth, sharedBoundaries, overlapAfter, normalize, sub, clip } from './fracture.js?v=20261004';
+import { ORE } from './config.js?v=20261004';
+import { distributeOre, oreArea } from './ore.js?v=20261004';
 export { sharedBoundaries };
 
-export function prepareRock(shape, detached = false) {
-  const properties = shapeProperties(shape), triangles = triangulate(shape);
+// Mass properties of a rock and the ore it holds. With ore as dense as rock
+// they are the visible polygon's own; denser ore shifts the center of mass
+// and adds inertia. `area` stays the visible area; `massArea` sets the mass.
+function materialProperties(shape, ores) {
+  const base = shapeProperties(shape), extra = ORE.densityFactor - 1;
+  if (!extra || !ores.length) return { ...base, massArea: base.area };
+  const parts = [base, ...ores.map(ore => { const p = shapeProperties(ore.shape); return { area: p.area * extra, center: p.center, inertia: p.inertia * extra }; })];
+  const massArea = parts.reduce((sum, p) => sum + p.area, 0);
+  const center = { x: parts.reduce((sum, p) => sum + p.area * p.center.x, 0) / massArea, y: parts.reduce((sum, p) => sum + p.area * p.center.y, 0) / massArea };
+  const inertia = parts.reduce((sum, p) => sum + p.inertia + p.area * ((p.center.x - center.x) ** 2 + (p.center.y - center.y) ** 2), 0);
+  return { area: base.area, massArea, center, inertia };
+}
+
+export function prepareRock(shape, detached = false, ores = []) {
+  const properties = materialProperties(shape, ores), triangles = triangulate(shape);
   let collisionShapes = [shape];
   if (detached) {
     let clearance = Math.min(.25, minimumWidth(shape) * .075);
@@ -50,17 +65,23 @@ function safeLaunches(allRetained, fragments, center, axis) {
   const radial = allRetained.map((piece, i) => i === 0 || slidesClear(piece, normalize(sub(shapeProperties(piece).center, center)), nearby.filter((_, j) => j !== i).flat(1)));
   return { spread, radial };
 }
-export function prepareFracture({ shape, entry, center, direction, detached, through = false, enclosed = 0 }, random) {
+export function prepareFracture({ shape, entry, center, direction, detached, through = false, enclosed = 0, ores = [] }, random) {
+  const none = { mode: 'none', retained: [], fragments: [], contacts: [] };
+  // A clean nugget has no rock to break.
+  if (shapeArea(shape) - oreArea(ores) < ORE.cleanTolerance) return none;
   const fracture = fractureShape(shape, entry, center, direction, random, through, enclosed);
-  if (fracture.mode === 'none') return { mode: 'none', retained: [], fragments: [], contacts: [] };
-  const retained = fracture.retained.sort((a, b) => shapeArea(b) - shapeArea(a));
+  if (fracture.mode === 'none') return none;
+  // The fracture ran through ore as if it were rock; each nugget now goes
+  // whole to one piece.
+  const pieces = distributeOre(fracture.retained.sort((a, b) => shapeArea(b) - shapeArea(a)), fracture.fragments, ores);
+  const retained = pieces.retained.map(piece => piece.shape), fragments = pieces.fragments.map(piece => piece.shape);
   return {
     mode: fracture.mode,
     axis: fracture.axis,
-    ...(fracture.mode === 'chip' ? safeLaunches(retained, fracture.fragments, center, fracture.axis) : {}),
+    ...(fracture.mode === 'chip' ? safeLaunches(retained, fragments, center, fracture.axis) : {}),
     // Indices follow [...retained, ...fragments].
-    contacts: sharedBoundaries([...retained, ...fracture.fragments]),
-    retained: retained.map((shape, i) => ({ shape, geometry: prepareRock(shape, detached || i > 0) })),
-    fragments: fracture.fragments.map(shape => ({ shape, geometry: prepareRock(shape, true) }))
+    contacts: sharedBoundaries([...retained, ...fragments]),
+    retained: pieces.retained.map(({ shape, ores }, i) => ({ shape, ores, geometry: prepareRock(shape, detached || i > 0, ores) })),
+    fragments: pieces.fragments.map(({ shape, ores }) => ({ shape, ores, geometry: prepareRock(shape, true, ores) }))
   };
 }

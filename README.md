@@ -37,7 +37,18 @@ Open http://localhost:8000 in a desktop browser with WebGL enabled.
 no rendering or physics dependency; `hud.js` draws it. Each simulation step the
 game filters the controls before they reach `Simulation.step`: thrust burns
 fuel and stops when the tank is empty (turning is free), and every round costs
-ammo. Hull, cargo and credits are tracked but not yet used. See `plan.md`.
+ammo. All tunables are in `config.js`. See `plan.md`.
+
+Ore nuggets (`ore.js`) are buried in the asteroid and stay hidden until
+enough of a nugget's outline faces open space. A rock's shape includes its
+ore, so fracture treats ore as solid; afterwards each nugget goes whole to
+the piece that held most of it and is subtracted from the others, so rounds
+never cut ore and rock area stays conserved. A drilling round stops and
+detonates at the first nugget in its path. A nugget mostly open to space
+breaks free; rock too small to stand alone stays stuck to it. Touch an
+ore-bearing piece with the bow at low relative speed to scoop it; dock slowly
+inside the station ring to sell (attached rock costs a cleaning fee), refuel
+and rearm.
 
 ## Fractures created at detonation
 

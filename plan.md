@@ -22,21 +22,27 @@ you lose your cargo (or your ship, in a hardcore mode).
   - `hud.js`: the DOM overlay for the gauges.
 - Keep `physics.js` / `fracture.js` mostly as they are. The game layer sits on top of them.
 
-### M1: Ore and collection (the question that matters most: is cutting ore fun?)
+### M1: Hidden ore and collection (implemented)
 
-- **Ore veins as polygons in the asteroid's local coordinates.** Texture coordinates
-  already stay in the original asteroid's frame, so a fragment's ore content =
-  `area(clip(fragmentShape, veinPolygons))`. Compute it in the worker inside
-  `prepareFracture` and send it back as metadata with each piece. Value comes from
-  the actual geometry.
-- Render veins by baking them into the rock texture (glinting metallic streaks).
-  Because UVs stay in the original frame, the veins line up automatically on every fragment.
-- **Scoop**: fragments under an area threshold that touch the ship's nose get
-  absorbed. Add value × mass to cargo and remove the body.
-- **Fuel and ammo**: thrust burns fuel, every shot costs ammo. HUD bars.
-- **Station**: a static body. Docking (slow approach inside a radius) sells cargo and refuels.
-- One hand-built asteroid with 2–3 veins. Playtest it.
-- Done when: you cut out a vein, pick up the pieces, sell them, and the numbers make sense.
+- **Ore nuggets** are hard convex crystals buried in the rock (`ore.js`,
+  placed by `placeOre`). A rock's shape includes the ore it holds; fracture
+  treats ore as solid rock, then hands each nugget **whole** to the piece that
+  held most of it. Ore is never cut.
+- **No clues**: a nugget is invisible until enough of its outline faces open
+  space (`ORE.revealExposure`), then stays revealed.
+- **Rounds stop at ore**: a drilling round detonates against buried ore; a
+  round striking exposed ore blows against it in the open and pushes it.
+- **Breaking free**: once most of a nugget faces open space
+  (`ORE.detachExposure`) it separates from its rock. Rock too small to stand
+  alone (`ORE.minRockPiece`) stays stuck to it as crust. A nugget can also fly
+  off still embedded in a fragment.
+- **Scoop** ore-bearing pieces (clean or dirty) by touching them with the bow
+  at low relative speed. Attached rock takes hold space and costs a cleaning
+  fee at the station; shooting the rock off first pays more.
+- **Station** docking ring: arrive slowly to sell, refuel and rearm.
+- All tunables live in `config.js` (ORE, SHIP, SCOOP, ECONOMY, STATION).
+- Open: does it feel good? Tune nugget depth/size, reveal and detach shares,
+  fee, by playtesting.
 
 ### M2: The belt
 
@@ -99,5 +105,4 @@ you lose your cargo (or your ship, in a hardcore mode).
 1. **Roguelite or persistent?** Losing the ship on death (tense, short runs) versus
    losing only the cargo (relaxed, longer progression). Suggested: lose cargo,
    with hardcore mode as an option.
-2. **Scoop only, or a tractor beam from the start?** Scoop only is simpler for M1;
-   the tractor beam is a fun later unlock.
+2. **Tractor beam** for towing pieces too large to scoop: later unlock (M3).

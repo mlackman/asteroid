@@ -1,6 +1,6 @@
 export class FracturePlanner {
   constructor() {
-    this.worker = new Worker(new URL('./fracture-worker.js?v=20261003-release', import.meta.url), { type: 'module' });
+    this.worker = new Worker(new URL('./fracture-worker.js?v=20261004', import.meta.url), { type: 'module' });
     this.pending = new Map();
     this.nextId = 0;
     this.worker.onmessage = ({ data: { id, result, error } }) => {

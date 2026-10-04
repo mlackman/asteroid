@@ -1,6 +1,8 @@
-import { rotate, sub, cross, normalize, contains, segmentHit, solidDistance, confinement } from './fracture.js?v=20261003-release';
-import { prepareRock, prepareFracture } from './rock-geometry.js?v=20261003-release';
-import { outline, pointClearance } from './clearance.js?v=20261003-release';
+import { rotate, sub, cross, normalize, contains, segmentHit, solidDistance, confinement } from './fracture.js?v=20261004';
+import { prepareRock, prepareFracture } from './rock-geometry.js?v=20261004';
+import { outline, pointClearance } from './clearance.js?v=20261004';
+import { oreArea, oreDistance } from './ore.js?v=20261004';
+import { SCOOP } from './config.js?v=20261004';
 const { Engine, Body, Composite, Resolver, Events } = globalThis.Matter;
 // Cached penetration corrections otherwise keep translating a body after it
 // leaves contact, producing a visible burst that decays despite constant velocity.
@@ -65,7 +67,7 @@ export class Simulation {
     Events.on(this.engine, 'collisionStart', event => reboundRockContacts(event.pairs));
     this.rocks = [];
     this.originalShape = asteroid.shape;
-    this.asteroid = this.createRock(asteroid.shape, { x: 180, y: 0 });
+    this.asteroid = this.createRock(asteroid.shape, { x: 180, y: 0 }, 0, null, false, null, asteroid.ores || []);
     this.totalArea = asteroid.area;
     this.shots = 0;
     this.explosions = 0;
@@ -79,7 +81,8 @@ export class Simulation {
     Body.setPosition(this.ship, { x: -405, y: -25 });
     Composite.add(this.engine.world, this.ship);
   }
-  createRock(shape, origin, angle = 0, parent = null, detached = false, geometry = prepareRock(shape, detached)) {
+  createRock(shape, origin, angle = 0, parent = null, detached = false, geometry = null, ores = []) {
+    geometry ??= prepareRock(shape, detached, ores);
     const { properties, triangles, materialBounds } = geometry;
     const parts = geometry.parts.map(({ polygon, center }) =>
       Body.create({ ...OPTIONS, restitution: 0, position: center, vertices: polygon.map(p => ({ ...p })) }));
@@ -88,9 +91,11 @@ export class Simulation {
     Body.setCentre(body, properties.center);
     // Use the polygon's actual area moment, independent of its triangulation.
     // Otherwise changing the collision decomposition could invent rotation.
-    Body.setMass(body, properties.area * OPTIONS.density);
+    Body.setMass(body, (properties.massArea ?? properties.area) * OPTIONS.density);
     Body.setInertia(body, properties.inertia * OPTIONS.density);
-    const entity = { body, pivot: { ...body.position }, shape, triangles, area: properties.area, detached, materialBounds };
+    // Ore is part of the rock's shape; `ores` lists the nuggets inside it.
+    const entity = { body, pivot: { ...body.position }, shape, triangles, area: properties.area, detached, materialBounds, ores, oreArea: oreArea(ores) };
+    entity.rockArea = Math.max(0, entity.area - entity.oreArea);
     const rotated = rotate(entity.pivot, angle);
     Body.setAngle(body, angle);
     Body.setPosition(body, { x: origin.x + rotated.x, y: origin.y + rotated.y });
@@ -135,15 +140,21 @@ export class Simulation {
     // a round sooner, so repeated shots into one spot deepen it slowly.
     bullet.enclosed = confinement(hit.entity.shape, bullet.entry, { x: -bullet.direction.x, y: -bullet.direction.y });
     const depth = (14 + this.random() * 20) * (1 - bullet.enclosed) ** 2;
-    // A round that would come out the far side passes through: it drills to
-    // the exit, leaves, and detonates just outside, cracking the rock along
-    // its tunnel. Otherwise it stops at its depth or at the first cavity.
-    const thickness = solidDistance(hit.entity.shape, bullet.entry, bullet.direction, depth + 1);
-    bullet.through = thickness <= depth;
-    bullet.depth = Math.max(0, Math.min(depth, thickness) - .0001);
     bullet.traveled = 0;
+    this.limitDrill(bullet, hit.entity, bullet.entry, depth);
     bullet.position = localToWorld(hit.entity, bullet.local);
     this.planFracture(bullet);
+  }
+  // A round that would come out the far side passes through: it drills to
+  // the exit, leaves, and detonates just outside, cracking the rock along
+  // its tunnel. Otherwise it stops at its depth, at the first cavity, or at
+  // the first ore, which it cannot cut.
+  limitDrill(bullet, entity, from, remaining) {
+    const thickness = solidDistance(entity.shape, from, bullet.direction, remaining + 1);
+    const ore = oreDistance(entity.ores, from, bullet.direction, remaining + 1);
+    bullet.struckOre = ore <= Math.min(remaining, thickness);
+    bullet.through = !bullet.struckOre && thickness <= remaining;
+    bullet.depth = bullet.traveled + Math.max(0, Math.min(remaining, thickness, ore) - .0001);
   }
   planFracture(bullet) {
     if (!this.fracturePlanner) return;
@@ -151,7 +162,7 @@ export class Simulation {
     const center = { x: bullet.local.x + bullet.direction.x * remaining, y: bullet.local.y + bullet.direction.y * remaining };
     const plan = { entity: bullet.entity, center, result: null, error: null };
     bullet.plan = plan;
-    const request = { shape: bullet.entity.shape, entry: bullet.entry, center, direction: bullet.direction, detached: bullet.entity.detached, through: bullet.through, enclosed: bullet.enclosed, seed: Math.floor(this.random() * 4294967296) };
+    const request = { shape: bullet.entity.shape, ores: bullet.entity.ores, entry: bullet.entry, center, direction: bullet.direction, detached: bullet.entity.detached, through: bullet.through, enclosed: bullet.enclosed, seed: Math.floor(this.random() * 4294967296) };
     // Only publish readiness here. Bodies are replaced inside a fixed physics
     // step, using the parent's current pose rather than its pose when work began.
     Promise.resolve(this.fracturePlanner(request)).then(result => {
@@ -170,22 +181,26 @@ export class Simulation {
       if (!bullet.plan.result) return;
       fracture = bullet.plan.result;
     } else {
-      fracture = prepareFracture({ shape: entity.shape, entry: bullet.entry, center: bullet.local, direction: bullet.direction, detached: entity.detached, through: bullet.through, enclosed: bullet.enclosed }, this.random);
+      fracture = prepareFracture({ shape: entity.shape, ores: entity.ores, entry: bullet.entry, center: bullet.local, direction: bullet.direction, detached: entity.detached, through: bullet.through, enclosed: bullet.enclosed }, this.random);
     }
     const center = localToWorld(entity, bullet.local);
     if (fracture.mode === 'none') {
       this.explosions++;
-      this.lastBlast = { center: bullet.through ? { ...bullet.position } : center, count: 0, depth: bullet.traveled, mode: 'none' };
+      this.lastBlast = { center: bullet.through ? { ...bullet.position } : center, count: 0, depth: bullet.traveled, mode: 'none', revealed: 0 };
       bullet.state = 'spent';
       if (bullet.through) this.pushOutside(bullet.position);
+      // A round that strikes ore at the surface blows against it in the open.
+      else if (bullet.struckOre) this.pushOutside(center);
       return;
     }
     const origin = localToWorld(entity, { x: 0, y: 0 }), angle = entity.body.angle;
     const wasMain = entity === this.asteroid;
     Composite.remove(this.engine.world, entity.body);
     this.rocks.splice(this.rocks.indexOf(entity), 1);
-    const remainders = fracture.retained.map(({ shape, geometry }, i) => this.createRock(shape, origin, angle, entity.body, entity.detached || i > 0, geometry));
-    const fragments = fracture.fragments.map(({ shape, geometry }) => this.createRock(shape, origin, angle, entity.body, true, geometry));
+    const remainders = fracture.retained.map(({ shape, geometry, ores }, i) => this.createRock(shape, origin, angle, entity.body, entity.detached || i > 0, geometry, ores || []));
+    const fragments = fracture.fragments.map(({ shape, geometry, ores }) => this.createRock(shape, origin, angle, entity.body, true, geometry, ores || []));
+    const wasRevealed = entity.ores.filter(ore => ore.revealed).length;
+    const revealed = [...remainders, ...fragments].reduce((sum, rock) => sum + rock.ores.filter(ore => ore.revealed).length, 0) - wasRevealed;
     if (wasMain) this.asteroid = remainders[0] || [...fragments].sort((a, b) => b.area - a.area)[0];
     const released = [...remainders.slice(1), ...fragments], parent = remainders[0] || null;
     // Chips leave through the crater's mouth. The planner faces the crater
@@ -263,17 +278,14 @@ export class Simulation {
         const replacement = [...remainders, ...fragments].find(r => contains(r.shape, other.local));
         if (replacement) {
           other.entity = replacement;
-          const remaining = Math.max(0, other.depth - other.traveled);
-          const thickness = solidDistance(replacement.shape, other.local, other.direction, remaining + 1);
-          other.through = thickness <= remaining;
-          other.depth = other.traveled + Math.max(0, Math.min(remaining, thickness) - .0001);
+          this.limitDrill(other, replacement, other.local, Math.max(0, other.depth - other.traveled));
           this.planFracture(other);
         }
         else other.state = 'spent';
       }
     }
     this.explosions++;
-    this.lastBlast = { center: bullet.through ? { ...bullet.position } : center, count: fragments.length + Math.max(0, remainders.length - 1), depth: bullet.traveled, mode: fracture.mode, exit: fracture.mode === 'chip' ? axis : null };
+    this.lastBlast = { center: bullet.through ? { ...bullet.position } : center, count: fragments.length + Math.max(0, remainders.length - 1), depth: bullet.traveled, mode: fracture.mode, exit: fracture.mode === 'chip' ? axis : null, revealed };
     bullet.state = 'spent';
     if (bullet.through) this.pushOutside(bullet.position, [...remainders, ...fragments]);
   }
@@ -427,6 +439,25 @@ export class Simulation {
     }
     this.bullets = this.bullets.filter(b => b.state !== 'spent');
   }
-  get retainedArea() { return this.asteroid.area; }
+  // Pieces with ore that the bow is touching and nearly at rest relative to.
+  scoopable(reach = SCOOP.reach, maxArea = SCOOP.maxArea, maxSpeed = SCOOP.maxSpeed) {
+    const offset = rotate(sub({ x: 0, y: 25 }, this.shipPivot), this.ship.angle);
+    const bow = { x: this.ship.position.x + offset.x, y: this.ship.position.y + offset.y };
+    const shipVelocity = velocityAt(this.ship, bow);
+    return this.rocks.filter(rock => {
+      if (!rock.ores.length || rock.area > maxArea) return false;
+      const v = velocityAt(rock.body, bow);
+      if (Math.hypot(v.x - shipVelocity.x, v.y - shipVelocity.y) * 60 > maxSpeed) return false;
+      return pointClearance(bow, outline(rock, localToWorld), contains) <= reach;
+    });
+  }
+  removeRock(entity) {
+    if (!this.rocks.includes(entity)) return;
+    Composite.remove(this.engine.world, entity.body);
+    this.rocks.splice(this.rocks.indexOf(entity), 1);
+    for (const bullet of this.bullets) if (bullet.entity === entity && bullet.state === 'drilling') bullet.state = 'spent';
+    if (this.asteroid === entity) this.asteroid = [...this.rocks].sort((a, b) => b.area - a.area)[0] || null;
+  }
+  get retainedArea() { return this.asteroid?.area ?? 0; }
   dispose() { this.disposed = true; Composite.clear(this.engine.world, false); Engine.clear(this.engine); }
 }

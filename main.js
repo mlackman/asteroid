@@ -1,8 +1,10 @@
 import * as THREE from './vendor/three.module.js';
-import { makeAsteroid, randomGenerator, onSegment, rotate } from './fracture.js?v=20261003-release';
-import { Simulation, STEP } from './physics.js?v=20261003-release';
-import { FracturePlanner } from './fracture-planner.js?v=20261003-release';
-import { Game } from './game.js?v=20261004';
+import { makeAsteroid, randomGenerator, onSegment, rotate, triangulate } from './fracture.js?v=20261004';
+import { Simulation, STEP } from './physics.js?v=20261004';
+import { FracturePlanner } from './fracture-planner.js?v=20261004';
+import { Game, payout } from './game.js?v=20261004';
+import { placeOre } from './ore.js?v=20261004';
+import { ORE, STATION } from './config.js?v=20261004';
 import { updateHud, showEvent, describeBlast } from './hud.js?v=20261004';
 
 const status = document.querySelector('#status');
@@ -21,6 +23,8 @@ const camera = new THREE.OrthographicCamera(-800, 800, 450, -450, .1, 100);
 camera.position.z = 20;
 const rockMaterial = new THREE.MeshBasicMaterial({ map: createRockTexture(), color: 0xffffff });
 const borderMaterial = new THREE.LineBasicMaterial({ color: 0xadc1c9, transparent: true, opacity: .45 });
+const oreMaterial = new THREE.MeshBasicMaterial({ color: 0xd8a93f });
+const oreEdgeMaterial = new THREE.LineBasicMaterial({ color: 0xffe7a1 });
 const cutMaterial = new THREE.LineBasicMaterial({ color: 0x59efb9, transparent: true, opacity: .9, depthTest: false });
 const rockVisuals = new Map();
 let simulation, fracturePlanner, paused = false, showCuts = false, followShip = false, zoom = 1, accumulator = 0, last = 0;
@@ -78,11 +82,21 @@ function createRockVisual(entity) {
   content.add(new THREE.LineSegments(edgeGeometry, borderMaterial));
   const cutGeometry = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(cuts, 3));
   const cutLines = new THREE.LineSegments(cutGeometry, cutMaterial); cutLines.visible = showCuts; cutLines.renderOrder = 1; content.add(cutLines);
+  // Ore stays hidden inside the rock until enough of it has been exposed.
+  const oreGeometries = [];
+  for (const ore of entity.ores) {
+    if (!ore.revealed) continue;
+    const fill = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(triangulate(ore.shape).flat().flatMap(p => [p.x, p.y, .25]), 3));
+    const edge = new THREE.BufferGeometry().setFromPoints(ore.shape[0].map(p => new THREE.Vector3(p.x, p.y, .35)));
+    content.add(new THREE.Mesh(fill, oreMaterial), new THREE.LineLoop(edge, oreEdgeMaterial));
+    oreGeometries.push(fill, edge);
+  }
   rockLayer.add(group);
-  rockVisuals.set(entity, { group, geometry, cutLines, edgeGeometry, cutGeometry });
+  rockVisuals.set(entity, { group, geometry, cutLines, edgeGeometry, cutGeometry, oreGeometries });
 }
 function removeRockVisual(entity, visual) {
   rockLayer.remove(visual.group); visual.geometry.dispose(); visual.edgeGeometry.dispose(); visual.cutGeometry.dispose();
+  for (const geometry of visual.oreGeometries) geometry.dispose();
   rockVisuals.delete(entity);
 }
 function clearRockVisuals() {
@@ -100,6 +114,12 @@ function syncRocks() {
     visual.group.rotation.z = entity.body.angle;
   }
 }
+
+// The station is a docking ring: arrive slowly inside it to sell and refuel.
+const stationVisual = new THREE.Group(); scene.add(stationVisual);
+stationVisual.position.set(STATION.position.x, STATION.position.y, -1);
+stationVisual.add(new THREE.Mesh(new THREE.RingGeometry(STATION.radius - 1.5, STATION.radius, 96), new THREE.MeshBasicMaterial({ color: 0x5fd0b0, transparent: true, opacity: .55 })));
+stationVisual.add(new THREE.Mesh(new THREE.RingGeometry(10, 14, 6), new THREE.MeshBasicMaterial({ color: 0x9df0d3 })));
 
 // The ship is an actual open V: two narrow wings meet at the firing tip.
 const shipVisual = new THREE.Group(); scene.add(shipVisual);
@@ -192,7 +212,9 @@ function reset() {
   if (fracturePlanner) fracturePlanner.dispose();
   clearRockVisuals();
   fracturePlanner = new FracturePlanner();
-  simulation = new Simulation(makeAsteroid(), Math.random, request => fracturePlanner.prepare(request));
+  const asteroid = makeAsteroid();
+  asteroid.ores = placeOre(asteroid.shape, randomGenerator(Math.floor(Math.random() * 4294967296)));
+  simulation = new Simulation(asteroid, Math.random, request => fracturePlanner.prepare(request));
   particles.length = 0;
   for (const f of flashes) { scene.remove(f.ring); f.ring.geometry.dispose(); f.ring.material.dispose(); } flashes.length = 0;
   blastSerial = 0; accumulator = 0; keys.clear(); game.newRun();
@@ -200,6 +222,19 @@ function reset() {
   showEvent('READY · Point the bow at the surface and fire.');
   syncRocks(); syncBullets(); updateHud(game, simulation);
   status.hidden = true;
+}
+function collectAndDock() {
+  for (const rock of simulation.scoopable()) {
+    const item = { oreArea: rock.oreArea, rockArea: rock.rockArea < ORE.cleanTolerance ? 0 : rock.rockArea };
+    if (!game.collect(item)) { showEvent('HOLD FULL · Dock at the station to sell.'); continue; }
+    simulation.removeRock(rock);
+    const dirt = item.rockArea ? ` with ${item.rockArea.toFixed(0)} m² rock (cleaning fee)` : ' · clean';
+    showEvent(`SCOOPED · ${item.oreArea.toFixed(0)} m² ore${dirt} · worth ${payout(item).toFixed(0)} CR`);
+  }
+  const ship = simulation.ship;
+  const distance = Math.hypot(ship.position.x - STATION.position.x, ship.position.y - STATION.position.y);
+  const sale = game.updateDocking(distance, Math.hypot(ship.velocity.x, ship.velocity.y) * 60);
+  if (sale) showEvent(sale.items ? `DOCKED · Sold ${sale.items} ${sale.items === 1 ? 'piece' : 'pieces'} for ${sale.credits.toFixed(0)} CR · refuelled and rearmed` : 'DOCKED · Refuelled and rearmed');
 }
 function resize() {
   renderer.setSize(innerWidth, innerHeight);
@@ -264,6 +299,7 @@ function frame(time) {
       particles.push({ x: simulation.ship.position.x + dir.x * 12, y: simulation.ship.position.y + dir.y * 12, vx: dir.x * 80 + simulation.ship.velocity.x * 60, vy: dir.y * 80 + simulation.ship.velocity.y * 60, life: .35, maxLife: .35, warm: false });
     }
     effects(dt);
+    collectAndDock();
   }
   syncRocks(); syncBullets();
   shipVisual.position.set(simulation.ship.position.x, simulation.ship.position.y, 2);

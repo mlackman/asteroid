@@ -14,7 +14,7 @@ export function describeBlast(blast, serial) {
   const description = blast.mode === 'split' ? `round passed through · ${blast.count + 1} pieces split along its tunnel`
     : blast.mode === 'shatter' ? `${blast.count} pieces shattered`
     : blast.count ? `${blast.count} pieces released` : 'Too little material for a stable split';
-  return `FRACTURE ${String(serial).padStart(3, '0')} · ${description} · ${blast.depth.toFixed(0)} m penetration`;
+  return `FRACTURE ${String(serial).padStart(3, '0')} · ${description} · ${blast.depth.toFixed(0)} m penetration${blast.revealed > 0 ? ' · ORE EXPOSED' : ''}`;
 }
 
 export function showEvent(text) { $('#event').textContent = text; }

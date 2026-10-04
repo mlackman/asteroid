@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Game, SHIP, FIRE_INTERVAL, FUEL_PER_SECOND } from '../game.js';
+import { Game, SHIP, payout } from '../game.js';
+import { ECONOMY, STATION } from '../config.js';
+
+const { fireInterval: FIRE_INTERVAL, fuelPerSecond: FUEL_PER_SECOND } = SHIP;
 
 const STEP = 1 / 120;
 
@@ -61,11 +64,46 @@ test('an empty magazine stops firing', () => {
 test('a new run refills the ship and keeps credits', () => {
   const game = new Game();
   game.update(new Set(['KeyW', 'Space']), 1);
-  game.cargo.push({ mass: 10, value: 5 });
+  game.collect({ oreArea: 10, rockArea: 5 });
   game.credits = 250;
   game.newRun();
   assert.equal(game.fuel, SHIP.fuelCapacity);
   assert.equal(game.ammo, SHIP.ammoCapacity);
   assert.equal(game.cargo.length, 0);
   assert.equal(game.credits, 250);
+});
+
+test('the hold takes ore and the rock stuck to it until it is full', () => {
+  const game = new Game({ ...SHIP, cargoCapacity: 300 });
+  assert.ok(game.collect({ oreArea: 150, rockArea: 50 }));
+  assert.equal(game.cargoMass, 200);
+  assert.ok(!game.collect({ oreArea: 90, rockArea: 20 }), 'too big for the space left');
+  assert.ok(game.collect({ oreArea: 100, rockArea: 0 }));
+  assert.equal(game.cargoMass, 300);
+});
+
+test('rock stuck to ore costs a cleaning fee and never pays below zero', () => {
+  const clean = payout({ oreArea: 200, rockArea: 0 });
+  const dirty = payout({ oreArea: 200, rockArea: 100 });
+  assert.equal(clean, 200 * ECONOMY.oreValue);
+  assert.equal(dirty, clean - 100 * ECONOMY.cleaningFee);
+  assert.equal(payout({ oreArea: 10, rockArea: 10000 }), 0);
+});
+
+test('docking slowly inside the ring sells the cargo once and refills the ship', () => {
+  const game = new Game();
+  game.collect({ oreArea: 200, rockArea: 40 });
+  game.update(new Set(['KeyW', 'Space']), 1);
+  assert.equal(game.updateDocking(STATION.radius + 1, 0), null, 'outside the ring');
+  assert.equal(game.updateDocking(STATION.radius - 1, STATION.maxDockSpeed + 1), null, 'too fast');
+  const sale = game.updateDocking(STATION.radius - 1, 0);
+  assert.equal(sale.items, 1);
+  assert.equal(sale.credits, payout({ oreArea: 200, rockArea: 40 }));
+  assert.equal(game.credits, sale.credits);
+  assert.equal(game.cargo.length, 0);
+  assert.equal(game.fuel, SHIP.fuelCapacity);
+  assert.equal(game.ammo, SHIP.ammoCapacity);
+  assert.equal(game.updateDocking(STATION.radius - 1, 0), null, 'docks once per visit');
+  game.updateDocking(STATION.radius + 5, 0);
+  assert.ok(game.updateDocking(STATION.radius - 1, 0), 'docks again after leaving');
 });

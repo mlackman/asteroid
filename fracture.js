@@ -67,7 +67,7 @@ export function triangulate(shape, depth = 0) {
   const regions = [...intersection(shape, mask), ...difference(shape, [mask])];
   return regions.flatMap(region => triangulate(region, depth + 1));
 }
-function hull(points) {
+export function hull(points) {
   const sorted = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
   const half = ps => {
     const result = [];
@@ -163,6 +163,9 @@ function intersection(shape, mask) { return fromCoordinates(clipping.intersectio
 // The parts of a shape inside a mask, as separate shapes.
 export const clip = intersection;
 function difference(shape, pieces) { return fromCoordinates(clipping.difference(toCoordinates(shape), pieces.map(toCoordinates))); }
+// A shape minus the given shapes, and the union of shapes, each as separate shapes.
+export const subtract = difference;
+export function unite(shapes) { return fromCoordinates(clipping.union(...shapes.map(toCoordinates))); }
 export function insetShape(shape, clearance) {
   // Subtract a narrow strip around every boundary, including hole boundaries.
   // Scaling toward a centroid can push concave edges outside the visible rock;
@@ -247,7 +250,7 @@ function facetedCutMask(center, direction, side, span, offset, curve, reach) {
 function perimeter(shape) {
   return shape.reduce((sum, ring) => sum + ring.reduce((s, p, i) => s + length(sub(p, ring[(i + 1) % ring.length])), 0), 0);
 }
-function isSliver(shape) {
+export function isSliver(shape) {
   const area = shapeArea(shape);
   return area < MIN_PIECE_AREA || 2 * area / perimeter(shape) < .8;
 }
