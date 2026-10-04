@@ -183,14 +183,20 @@ function extent(shape, center) {
 function inBlastFrame(center, direction, side, forward, across) {
   return { x: center.x + direction.x * forward + side.x * across, y: center.y + direction.y * forward + side.y * across };
 }
-function blastFootprint(center, direction, side, radius, reach, profile) {
-  const contour = profile.map(p => inBlastFrame(center, direction, side, radius * p.scale * Math.cos(p.angle), radius * p.scale * Math.sin(p.angle)));
-  // A coarse arc makes the closed end of the U. Its sides flare by about 20
-  // degrees toward the exterior, like a crater bowl, leaving room for pieces
-  // to spread sideways as they leave instead of sliding through the walls.
-  const mouth = radius * 1.2 + reach * .36;
-  contour.push(inBlastFrame(center, direction, side, -reach, mouth));
-  contour.push(inBlastFrame(center, direction, side, -reach, -mouth));
+// A rough crater bowl. Its rim lies on the rock surface `surface` units behind
+// the detonation point and its floor `floor` units beyond it, so the round sits
+// near the bottom of a bowl that is several times wider than it is deep. Each
+// side has its own width, and corners run up both walls to the rim.
+function blastFootprint(center, direction, side, surface, floor, profile, reach) {
+  const depth = surface + floor;
+  const halfWidth = u => depth * (u < 0 ? profile.left : profile.right);
+  const contour = profile.points.map(({ u, scale }) => inBlastFrame(center, direction, side, -surface + depth * (1 - u * u) * scale, u * halfWidth(u)));
+  // Past the rim the walls keep their slope out through the exterior, so the
+  // bowl cuts cleanly through an uneven surface.
+  for (const u of [-1, 1]) {
+    const flare = halfWidth(u) / (2 * depth);
+    contour.push(inBlastFrame(center, direction, side, -surface - reach, u * (halfWidth(u) + reach * flare)));
+  }
   // Keep the pocket convex: inward hooks can mechanically trap matching pieces.
   return [hull(contour)];
 }
@@ -366,7 +372,7 @@ function wallCracks(shape, cap, center, axis, radius, random) {
   for (let i = -16; i <= 16; i++) {
     const direction = rotate(axis, i / 16 * Math.PI * 4 / 9);
     const inPocket = solidDistance(cap, center, direction, reach), toSurface = solidDistance(shape, center, direction, reach);
-    // Rays that leave through the pocket's open end have no wall.
+    // Rays that leave through the crater's mouth have no wall.
     samples.push({ direction, inPocket, wall: toSurface - inPocket < 1e-3 ? Infinity : toSurface - inPocket });
   }
   const thin = samples.filter((sample, i) => sample.wall < radius &&
@@ -385,29 +391,49 @@ export function fractureShape(shape, entry, center, direction, random = Math.ran
   const drillDirection = length(sub(center, entry)) > 1e-5 ? normalize(sub(center, entry)) : normalize(direction);
   const side = { x: -drillDirection.y, y: drillDirection.x };
   const depth = length(sub(center, entry)), reach = extent(shape, center) * 6 + 10;
-  const segments = 5 + Math.floor(random() * 4), profile = [];
-  for (let i = 0; i <= segments; i++) {
-    const jitter = i === 0 || i === segments ? 0 : (random() - .5) * .2;
-    profile.push({ angle: (i + jitter) / segments * Math.PI - Math.PI / 2, scale: .9 + random() * .2 });
+  // The bowl is 2.5–3.5 times wider than deep, a little lopsided, with 12–16
+  // corners from rim to rim. Corners crowd toward the rim, where the wall is
+  // steepest, and are unevenly spaced. They stay on the convex curve, since
+  // a corner pushed inward would be dropped and leave a long straight wall.
+  const corners = 12 + Math.floor(random() * 5), width = 1.25 + random() * .5;
+  const profile = { left: width * (.85 + random() * .3), right: width * (.85 + random() * .3), points: [] };
+  for (let i = 0; i <= corners; i++) {
+    const v = -1 + (2 * i + (i > 0 && i < corners ? (random() - .5) * .8 : 0)) / corners;
+    profile.points.push({ u: (v + Math.sin(v * Math.PI / 2)) / 2, scale: 1 });
   }
-  let radius = depth * (.85 + random() * .7), cap = null, axis = drillDirection;
-  // A buried charge breaks out toward the nearest free surface, so the U turns
-  // from the drill line toward the inward surface normal. The turn is limited
-  // so the whole drill path stays inside the pocket and remains a fracture.
+  let radius = depth * (.85 + random() * .7), floor = radius * (.25 + random() * .15), scale = 1, cap = null, axis = drillDirection;
+  // A buried charge breaks out toward the nearest free surface, so the bowl
+  // turns from the drill line toward the inward surface normal, as far as the
+  // entry point stays inside its rim. The whole drill path then lies inside
+  // the crater and remains a fracture.
   const normal = surfaceNormal(shape, entry);
-  const turn = normal ? Math.atan2(cross(drillDirection, { x: -normal.x, y: -normal.y }), -(drillDirection.x * normal.x + drillDirection.y * normal.y)) * .7 : 0;
-  // Keep the U-shaped pocket connected to the surface and local to this
+  const turn = normal ? Math.atan2(cross(drillDirection, { x: -normal.x, y: -normal.y }), -(drillDirection.x * normal.x + drillDirection.y * normal.y)) : 0;
+  // Keep the crater connected to the surface and local to this
   // impact, including when an earlier shot has left a nearby cavity. A pocket
   // that would take out a large share of the body means the blast is too big
   // for it: the whole body shatters instead.
   for (let attempt = 0; attempt < 7; attempt++) {
-    const limit = Math.min(Math.PI / 6, depth > 1e-5 ? Math.asin(Math.min(1, .8 * radius / depth)) : Math.PI / 6);
-    axis = rotate(drillDirection, Math.max(-limit, Math.min(limit, turn)));
-    const candidates = intersection(shape, blastFootprint(center, axis, { x: -axis.y, y: axis.x }, radius, reach, profile));
+    // The entry point lies depth·sin(turn) from the bowl's axis and must stay
+    // well inside the rim. A grazing round stretches the bowl on its entry
+    // side, up to 3.5 times its depth, like an oblique impact crater; beyond
+    // that the bowl turns less.
+    const surfaceAt = a => { const back = rotate(drillDirection, a); return solidDistance(shape, center, { x: -back.x, y: -back.y }, reach); };
+    let tilt = turn, shaped = null;
+    for (let k = 4; k >= 0 && !shaped; k--) {
+      tilt = turn * k / 4;
+      const bowl = surfaceAt(tilt) + floor * scale, needed = depth * Math.abs(Math.sin(tilt)) / .8 / bowl;
+      // Positive turns put the entry on the bowl's left (negative across) side.
+      const entrySide = tilt > 0 ? 'left' : 'right';
+      const widths = { left: profile.left * scale, right: profile.right * scale };
+      if (needed <= Math.max(widths[entrySide], 3.5) || k === 0) shaped = { ...profile, ...widths, [entrySide]: Math.max(widths[entrySide], Math.min(needed, 3.5)) };
+    }
+    axis = rotate(drillDirection, tilt);
+    const footprint = blastFootprint(center, axis, { x: -axis.y, y: axis.x }, surfaceAt(tilt), floor * scale, shaped, reach);
+    const candidates = intersection(shape, footprint);
     cap = candidates.find(piece => contains(piece, center));
     if (attempt === 0 && (!cap || shapeArea(cap) > area * .4)) return shatter(shape, center, area, random) || unchanged;
     if (cap && shapeArea(cap) <= Math.min(5200, area * .4) && extent(cap, center) < 155) break;
-    cap = null; radius *= .73;
+    cap = null; radius *= .73; scale *= .8;
   }
   if (!cap || isSliver(cap)) return unchanged;
   let retained = difference(shape, [cap]);

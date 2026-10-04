@@ -185,19 +185,20 @@ export class Simulation {
     const fragments = fracture.fragments.map(({ shape, geometry }) => this.createRock(shape, origin, angle, entity.body, true, geometry));
     if (wasMain) this.asteroid = remainders[0] || [...fragments].sort((a, b) => b.area - a.area)[0];
     const released = [...remainders.slice(1), ...fragments], parent = remainders[0] || null;
-    // Chips leave through the pocket's open end. The planner turns the pocket
-    // toward the surface normal, so angled hits throw debris away from the
+    // Chips leave through the crater's mouth. The planner faces the crater
+    // along the surface normal, so angled hits throw debris away from the
     // surface rather than back along the bullet.
     const pocket = fracture.axis || bullet.direction;
     const axis = rotate({ x: -pocket.x, y: -pocket.y }, angle);
     // Crater chips share one drift plus an expansion proportional to their
     // offset from the blast, so pieces fan out yet every pair moves apart.
-    // Expansion across the pocket is gentler so deep pieces stay off its walls.
+    // The bowl's walls slope outward, so the fan can open as wide across the
+    // crater as along it.
     const side = { x: -axis.y, y: axis.x };
     const chips = fracture.mode === 'chip' ? fragments : [];
     const offsets = chips.map(fragment => sub(fragment.body.position, center));
     const drift = 12 + this.random() * 2, maxOffset = Math.max(1, ...offsets.map(offset => Math.hypot(offset.x, offset.y)));
-    const along = (5 + this.random() * 2) / maxOffset, across = (3.5 + this.random()) / maxOffset;
+    const along = (5 + this.random() * 2) / maxOffset, across = (5 + this.random() * 2) / maxOffset;
     const launches = released.map(fragment => {
       const i = chips.indexOf(fragment);
       if (i >= 0) {

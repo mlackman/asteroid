@@ -47,15 +47,19 @@ nothing. The blast also pushes rocks within 60 world units, less with distance
 and with size. A rock in the way before the fuse runs out takes the round instead.
 
 A round that stops inside a body detonates there, and the result depends on how
-large the blast is compared with that body. On a large body, a U-shaped blast pocket surrounds the detonation point on both
-sides of the bullet's straight line. Its closed end extends into the asteroid
-as a rough arc with a few noticeable polygon corners; the open end faces the
-exterior. Like a buried charge breaking out toward the nearest free surface,
-the pocket turns from the bullet line toward the inward surface normal at the
-entry point: 70% of the way, at most 30 degrees, and never so far that the drill
-path leaves the pocket. Its sides flare by about 20 degrees toward the surface,
-like a crater bowl. The pocket stays convex to avoid hooks that mechanically
-trap pieces.
+large the blast is compared with that body. On a large body, the blast digs a
+rough crater bowl. Its rim lies on the actual rock surface and its floor a
+little beyond the detonation point, so the bowl is 2.5–3.5 times wider than it
+is deep, with walls meeting the surface at roughly 35–55 degrees. Its 12–16
+corners are spaced unevenly and crowd toward the rim, where the wall is
+steepest, so no wall is one long straight edge; the two sides of a bowl differ
+in width by up to about 30%. Like a buried charge breaking out toward the
+nearest free surface, the bowl faces along the inward surface normal at the
+entry point rather than along the bullet. The entry point must stay inside the
+rim: a grazing round stretches the bowl on its entry side, up to 3.5 times its
+depth, like an oblique impact crater, and only beyond that does the bowl tilt
+toward the bullet. The bowl stays convex to avoid hooks that mechanically trap
+pieces.
 The bullet line first splits it into two sides; optional angled polylines
 subdivide either side into uneven chunks. Radius, corner positions, cut angles
 and chunk proportions vary between blasts. Extra cuts are skipped if they would
@@ -63,14 +67,14 @@ produce narrow shards. Each successful
 blast releases 2–4 pieces, counting any disconnected regions of the parent rock.
 The region is bounded by distance and area, so shots chip the surface gradually.
 
-Rock between the pocket and the outer surface fails where it is thin compared
-with the blast. Across the pocket's closed end, the walls that are thinner than
+Rock between the crater and the outer surface fails where it is thin compared
+with the blast. Across the crater's floor and lower walls, the walls that are thinner than
 the blast radius crack through to the surface along rough lines, up to two of
 them, breaking off larger pieces beside the crater chips. The intact asteroid's
 walls are far too thick for this; a medium fragment often cracks, and an
 asteroid worn thin between old cavities occasionally does.
 
-If the pocket would take out more than 40% of the body, the blast is too large
+If the crater would take out more than 40% of the body, the blast is too large
 for it and the whole body shatters into 2–4 wedges around the detonation point,
 more for larger bodies. The first crack runs to the nearest free surface and
 the others divide the circle roughly evenly. Freshly released fragments usually
@@ -103,11 +107,11 @@ visible polygon rather than its collider.
 Pieces inherit their parent's motion and receive one launch impulse. Pieces
 from a wall crack, a shatter or a tunnel split move away from the blast point;
 wall pieces sit behind the crater and get a gentler push. Crater chips leave
-along the pocket's axis, so angled hits throw debris away from the
+along the bowl's axis, so angled hits throw debris away from the
 surface rather than back along the bullet. On top of a shared 12–14 world units
 per second drift, each piece gets an expansion proportional to its offset from
-the detonation point, stronger along the pocket than across it, so the pieces
-fan out without pressing into the flared walls. Because this is a linear
+the detonation point, so the pieces fan out over roughly 25–40 degrees; the
+bowl's sloping walls leave them room to. Because this is a linear
 velocity field, every pair of siblings moves apart; no trajectories cross.
 There are no ongoing release forces.
 
@@ -150,12 +154,13 @@ cannot be destroyed, and extremely small pieces stop splitting for stability.
 node --test tests/*.test.js
 ```
 
-Tests cover complementary cuts, a faceted U with its open end toward the exterior,
+Tests cover complementary cuts, a rough crater bowl wider than deep with no long
+straight wall,
 rounds that pass through a piece cracking only the rock they crossed and
 detonating outside it, blasts that shatter small bodies, crack thin walls of
 medium ones and only crater large ones,
-a pocket turned toward the surface normal on angled drills, pieces leaving the
-flared pocket without sliding through its walls,
+a bowl facing along the surface normal on angled drills, pieces leaving the
+crater without sliding through its walls,
 release on both sides of the straight drill edge, constant-velocity exit through
 the cavity, rotated impacts, repeated fragment splitting, concave outlines, holes, slivers, shallow drilling, inherited motion,
 area and momentum conservation, shape variety across identical impacts,

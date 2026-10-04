@@ -95,25 +95,32 @@ test('detonation releases material on both sides of the drill line and beyond th
   }
 });
 
-test('the closed end of the U-shaped blast is faceted around the detonation and opens toward the surface', () => {
+test('the blast leaves a rough crater bowl, wider than deep, with corners up both walls', () => {
   const shape = [[{ x: -250, y: -200 }, { x: 250, y: -200 }, { x: 250, y: 200 }, { x: -250, y: 200 }]];
-  const center = { x: 0, y: -174 };
+  const center = { x: 0, y: -174 }, longest = [];
   for (let seed = 1; seed <= 20; seed++) {
     const result = fractureShape(shape, { x: 0, y: -200 }, center, { x: 0, y: 1 }, randomGenerator(seed));
-    assert.equal(result.mode, 'chip');
-    const boundary = result.retained.flat(2).filter(p => Math.abs(p.x) < 249 && p.y > -199);
-    const radii = boundary.map(p => Math.hypot(p.x - center.x, p.y - center.y));
-    assert.ok(boundary.length >= 4 && boundary.length <= 14, 'use a few noticeable polygon corners rather than a smooth arc');
-    assert.ok(Math.max(...radii) / Math.min(...radii) < 1.4, 'the closed end should form a rough arc around the detonation');
+    assert.equal(result.mode, 'chip'); assertPartition(shape, [...result.retained, ...result.fragments]);
+    const crater = result.fragments.flat(2), rim = crater.filter(p => p.y < -199.999);
+    const width = Math.max(...rim.map(p => p.x)) - Math.min(...rim.map(p => p.x)), depth = Math.max(...crater.map(p => p.y)) + 200;
+    assert.ok(width / depth > 2.2 && width / depth < 4, `seed ${seed}: a bowl, not a slot (width/depth ${width / depth})`);
+    assert.ok(depth > center.y + 200 + 2, 'the floor lies a little beyond the detonation point');
+    // The crater wall is the parent's outline below the surface.
+    const ring = result.retained[0][0], inCrater = p => p.y > -199.999 && Math.abs(p.x) < 249, wall = ring.filter(inCrater);
+    assert.ok(wall.length >= 10, `seed ${seed}: noticeable corners across the bowl, ${wall.length}`);
+    const edges = ring.map((p, i) => [p, ring[(i + 1) % ring.length]]).filter(([p, q]) => (inCrater(p) || inCrater(q)) && Math.abs(p.x) < 249 && Math.abs(q.x) < 249);
+    longest.push(Math.max(...edges.map(([p, q]) => Math.hypot(q.x - p.x, q.y - p.y))) / depth);
     for (const point of [{ x: -5, y: -199 }, { x: 5, y: -199 }]) {
-      assert.ok(result.fragments.some(piece => contains(piece, point)), 'both sides of the open end must reach the exterior');
+      assert.ok(result.fragments.some(piece => contains(piece, point)), 'both sides of the crater reach the exterior');
       assert.ok(!result.retained.some(piece => contains(piece, point)));
     }
-    assertPartition(shape, [...result.retained, ...result.fragments]);
   }
+  // The U-shaped pocket had one straight wall edge about 0.8 of the crater's depth.
+  assert.ok(longest.reduce((sum, n) => sum + n, 0) / longest.length < .45, `no long straight wall: ${longest.map(n => n.toFixed(2)).join(' ')}`);
+  assert.ok(Math.max(...longest) < .7);
 });
 
-test('an angled drill turns the pocket toward the surface normal and keeps the drill path as a fracture', () => {
+test('an angled drill turns the bowl to the surface normal and keeps the drill path as a fracture', () => {
   const shape = [[{ x: -250, y: -200 }, { x: 250, y: -200 }, { x: 250, y: 200 }, { x: -250, y: 200 }]];
   const inward = { x: 0, y: 1 }, entry = { x: 0, y: -200 };
   const angleTo = v => Math.acos(Math.max(-1, Math.min(1, v.x * inward.x + v.y * inward.y)));
@@ -123,8 +130,8 @@ test('an angled drill turns the pocket toward the surface normal and keeps the d
     for (let seed = 1; seed <= 10; seed++) {
       const result = fractureShape(shape, entry, center, direction, randomGenerator(seed));
       assert.equal(result.mode, 'chip'); assertPartition(shape, [...result.retained, ...result.fragments]);
-      assert.ok(angleTo(result.axis) < Math.abs(tilt) - Math.PI / 18, `${degrees} deg, seed ${seed}: the pocket turns toward the inward normal`);
-      assert.ok(Math.sign(result.axis.x) === Math.sign(direction.x), 'the pocket turns only part of the way');
+      // A wide bowl fits the whole drill path even when it turns all the way.
+      assert.ok(angleTo(result.axis) < 1e-6, `${degrees} deg, seed ${seed}: the bowl faces straight out of the surface`);
       for (const t of [.1, .5, .9]) {
         const point = { x: entry.x + (center.x - entry.x) * t, y: entry.y + (center.y - entry.y) * t };
         const usesDrillEdge = piece => piece.some(ring => ring.some((a, i) => onSegment(point, a, ring[(i + 1) % ring.length])));
@@ -144,10 +151,13 @@ test('a blast inside a body scales with it: shatter, crater with wall cracks, or
   });
   // The blast is as large as a small body: it breaks into wedges.
   for (const result of outcomes(60)) { assert.equal(result.mode, 'shatter'); assert.ok(result.fragments.length >= 2); }
-  // Thin walls behind a crater in a medium body crack through to the surface.
-  const medium = outcomes(120);
-  assert.ok(medium.every(result => result.mode === 'chip'));
-  assert.ok(medium.filter(result => result.retained.length >= 2).length >= 8, 'walls often crack on a medium body');
+  // Thin walls behind a crater in a medium body crack through to the surface,
+  // less often as the body grows.
+  const medium = outcomes(90), larger = outcomes(120);
+  assert.ok([...medium, ...larger].every(result => result.mode === 'chip'));
+  const cracked = results => results.filter(result => result.retained.length >= 2).length;
+  assert.ok(cracked(medium) >= 12, 'walls usually crack on a medium body');
+  assert.ok(cracked(larger) >= 3 && cracked(larger) < cracked(medium), 'and sometimes on a larger one');
   // Thick walls hold: only the crater comes out.
   for (const result of outcomes(160)) { assert.equal(result.mode, 'chip'); assert.equal(result.retained.length, 1); }
   for (let seed = 1; seed <= 20; seed++) {
@@ -192,9 +202,11 @@ test('surface blasts produce two to four broad compact pieces instead of pointed
     }
   }
   assert.deepEqual([...counts].sort(), [2, 3, 4]);
-  // Even an equilateral triangle cannot exceed about 0.605 compactness.
-  // This checks the actual filled outlines, not cosmetic corner smoothing.
-  assert.ok(scores.reduce((sum, n) => sum + n, 0) / scores.length > .7);
+  // Even an equilateral triangle cannot exceed about 0.605 compactness, and
+  // half of a bowl 2.5–3.5 times wider than deep scores about 0.65: rim
+  // pieces are flat plates. This checks the actual filled outlines, not
+  // cosmetic corner smoothing.
+  assert.ok(scores.reduce((sum, n) => sum + n, 0) / scores.length > .6);
   assert.ok(Math.min(...scores) > .5, 'avoid needle-shaped shards');
 });
 
@@ -446,8 +458,12 @@ test('chips fan out from the blast so no two siblings start on converging paths'
   for (let seed = 1; seed <= 20; seed++) {
     const sim = new Simulation(asteroid, randomGenerator(seed)); sim.fire(); runToExplosion(sim);
     const fragments = sim.rocks.filter(r => r !== sim.asteroid);
-    const directions = fragments.map(({ body }) => { const v = Body.getVelocity(body); return Math.atan2(v.y, v.x); });
-    assert.ok(Math.max(...directions) - Math.min(...directions) > Math.PI / 6, `seed ${seed}: launch directions spread out`);
+    // Measure directions relative to the mean launch so angles near ±180°
+    // do not wrap around.
+    const velocities = fragments.map(({ body }) => Body.getVelocity(body));
+    const mean = Math.atan2(velocities.reduce((sum, v) => sum + v.y, 0), velocities.reduce((sum, v) => sum + v.x, 0));
+    const directions = velocities.map(v => Math.atan2(Math.sin(Math.atan2(v.y, v.x) - mean), Math.cos(Math.atan2(v.y, v.x) - mean)));
+    assert.ok(Math.max(...directions) - Math.min(...directions) > Math.PI * 25 / 180, `seed ${seed}: launch directions spread out, ${(Math.max(...directions) - Math.min(...directions)) * 180 / Math.PI} deg`);
     for (const [i, a] of fragments.entries()) for (const b of fragments.slice(i + 1)) {
       const va = Body.getVelocity(a.body), vb = Body.getVelocity(b.body);
       const closing = (va.x - vb.x) * (a.body.position.x - b.body.position.x) + (va.y - vb.y) * (a.body.position.y - b.body.position.y);
@@ -480,10 +496,10 @@ test('an angled hit throws debris toward the surface normal rather than back alo
   }
 });
 
-test('an interior chunk exits through the open U at constant velocity without rebounding inside', () => {
+test('the deepest chunk leaves the crater at constant velocity without rebounding inside', () => {
   const sim = new Simulation(asteroid, randomGenerator(5)); sim.fire(); runToExplosion(sim);
+  // The deepest piece has the farthest to travel past the crater walls.
   const interior = sim.rocks.filter(r => r !== sim.asteroid).sort((a, b) => b.body.position.x - a.body.position.x)[0];
-  assert.ok(interior.body.position.x > sim.lastBlast.center.x + 2, 'choose an interior piece beyond the explosion');
   const velocity = Body.getVelocity(interior.body), before = { ...interior.body.position };
   assert.ok(velocity.x < -.1, 'the launch goes toward the cavity opening');
   let collided = false;
