@@ -143,18 +143,3 @@ test('a round striking exposed ore pushes it without breaking it', () => {
   assert.equal(sim.rocks[0], rock);
   assert.ok(rock.body.velocity.x > 0, 'pushed away from the blast');
 });
-
-test('the bow scoops ore-bearing pieces it touches at low relative speed', () => {
-  const ore = nugget(0, 0, 0, 8);
-  const sim = new Simulation({ shape: ore.shape, area: ore.area, ores: [ore] }, randomGenerator(2));
-  const rock = sim.rocks[0];
-  globalThis.Matter.Body.setPosition(rock.body, { x: -405 + 25.4 + 8 + 3, y: -25 });
-  assert.deepEqual(sim.scoopable(), [rock]);
-  globalThis.Matter.Body.setVelocity(rock.body, { x: 1, y: 0 });
-  assert.deepEqual(sim.scoopable(), [], 'too fast');
-  globalThis.Matter.Body.setVelocity(rock.body, { x: 0, y: 0 });
-  globalThis.Matter.Body.setPosition(rock.body, { x: -300, y: -25 });
-  assert.deepEqual(sim.scoopable(), [], 'out of reach');
-  sim.removeRock(rock);
-  assert.equal(sim.rocks.length, 0);
-});

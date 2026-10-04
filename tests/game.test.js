@@ -82,12 +82,9 @@ test('the hold takes ore and the rock stuck to it until it is full', () => {
   assert.equal(game.cargoMass, 300);
 });
 
-test('rock stuck to ore costs a cleaning fee and never pays below zero', () => {
-  const clean = payout({ oreArea: 200, rockArea: 0 });
-  const dirty = payout({ oreArea: 200, rockArea: 100 });
-  assert.equal(clean, 200 * ECONOMY.oreValue);
-  assert.equal(dirty, clean - 100 * ECONOMY.cleaningFee);
-  assert.equal(payout({ oreArea: 10, rockArea: 10000 }), 0);
+test('delivered ore pays by its area; attached rock pays nothing', () => {
+  assert.equal(payout({ oreArea: 200, rockArea: 0 }), 200 * ECONOMY.oreValue);
+  assert.equal(payout({ oreArea: 200, rockArea: 500 }), 200 * ECONOMY.oreValue);
 });
 
 test('docking slowly inside the ring sells the cargo once and refills the ship', () => {
@@ -106,4 +103,13 @@ test('docking slowly inside the ring sells the cargo once and refills the ship',
   assert.equal(game.updateDocking(STATION.radius - 1, 0), null, 'docks once per visit');
   game.updateDocking(STATION.radius + 5, 0);
   assert.ok(game.updateDocking(STATION.radius - 1, 0), 'docks again after leaving');
+});
+
+test('docking also sells the ore carried on the poles', () => {
+  const game = new Game();
+  game.collect({ oreArea: 100, rockArea: 0 });
+  const sale = game.updateDocking(0, 0, [{ oreArea: 300, rockArea: 900 }]);
+  assert.equal(sale.items, 2);
+  assert.equal(sale.credits, payout({ oreArea: 400 }));
+  assert.equal(game.credits, sale.credits);
 });

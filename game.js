@@ -4,10 +4,10 @@
 import { SHIP, ECONOMY, STATION } from './config.js?v=20261004';
 export { SHIP };
 
-// What delivered material pays: ore value, less the station's fee for
-// cleaning off the rock still stuck to it. Never negative.
-export function payout({ oreArea, rockArea }, economy = ECONOMY) {
-  return Math.max(0, oreArea * economy.oreValue - rockArea * economy.cleaningFee);
+// What delivered material pays. Rock stuck to the ore pays nothing; it only
+// costs hold space and mass on the way home.
+export function payout({ oreArea }, economy = ECONOMY) {
+  return oreArea * economy.oreValue;
 }
 
 export class Game {
@@ -48,21 +48,22 @@ export class Game {
     const fire = keys.has('Space') && this.tryFire();
     return { controls, fire };
   }
-  // Take a scooped piece into the hold if it fits. Rock stuck to the ore
+  // Stow a piece in the hold if it fits. Rock stuck to the ore
   // takes space too.
   collect(item) {
     if (this.cargoMass + item.oreArea + item.rockArea > this.ship.cargoCapacity) return false;
     this.cargo.push({ oreArea: item.oreArea, rockArea: item.rockArea });
     return true;
   }
-  // Called each frame with the ship's distance from the station and its speed.
-  // Arriving slowly inside the ring docks once: the cargo is sold and the
-  // ship refuelled and rearmed. Leaving the ring allows the next docking.
-  updateDocking(distance, speed) {
+  // Called each frame with the ship's distance from the station, its speed and
+  // the ore-bearing pieces it carries on its poles. Arriving slowly inside the
+  // ring docks once: the hold and the carried pieces are sold and the ship
+  // refuelled and rearmed. Leaving the ring allows the next docking.
+  updateDocking(distance, speed, carried = []) {
     if (distance > this.station.radius) { this.docked = false; return null; }
     if (this.docked || speed > this.station.maxDockSpeed) return null;
     this.docked = true;
-    const sale = { items: this.cargo.length, credits: this.cargoValue };
+    const sale = { items: this.cargo.length + carried.length, credits: this.cargoValue + carried.reduce((sum, item) => sum + payout(item), 0) };
     this.credits += sale.credits;
     this.cargo = [];
     this.fuel = this.ship.fuelCapacity;

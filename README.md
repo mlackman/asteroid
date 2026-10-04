@@ -24,6 +24,8 @@ Open http://localhost:8000 in a desktop browser with WebGL enabled.
 - **A / S**: apply left/right turning torque (D also turns right). Rotation keeps
   its momentum; use the opposite key to stop it.
 - **Space**: fire from the tip of the V. Hold to fire every 0.38 seconds.
+- **E**: extend the grappling poles / retract them, stowing small ore in the hold.
+- **Q**: release what the poles hold.
 - **R**: reset the original asteroid and ship, and refill fuel and ammo.
 - **P** or **Pause**: pause/resume.
 - **Scroll**: zoom. The default world view stays fixed so drift is easy to judge.
@@ -45,10 +47,21 @@ ore, so fracture treats ore as solid; afterwards each nugget goes whole to
 the piece that held most of it and is subtracted from the others, so rounds
 never cut ore and rock area stays conserved. A drilling round stops and
 detonates at the first nugget in its path. A nugget mostly open to space
-breaks free; rock too small to stand alone stays stuck to it. Touch an
-ore-bearing piece with the bow at low relative speed to scoop it; dock slowly
-inside the station ring to sell (attached rock costs a cleaning fee), refuel
-and rearm.
+breaks free; rock too small to stand alone stays stuck to it. Ore pays by
+its area; attached rock pays nothing but adds mass and takes hold space.
+
+Each wing carries a rigid grappling pole. **E** extends the poles; a pole
+whose tip touches a piece light enough and nearly at rest relative to it
+grabs it. The piece then joins the ship's compound body (a perfectly
+inelastic merge that conserves linear and angular momentum). Thrust and
+turning torque are sized for the empty ship, so a load slows both, and
+thrust pushes from the engine rather than the shared center of mass, so a
+load on one side turns the ship while thrusting. **E** again retracts the
+poles, stowing small ore-bearing pieces in the hold; larger pieces stay on
+their pole to be carried to the station. **Q** releases what the poles hold;
+a released piece keeps the ship's motion where it was held. A round that
+breaks a held piece releases it first. Dock slowly inside the station ring to
+sell the hold and the carried ore, refuel and rearm.
 
 ## Fractures created at detonation
 

@@ -2,7 +2,7 @@ import { rotate, sub, cross, normalize, contains, segmentHit, solidDistance, con
 import { prepareRock, prepareFracture } from './rock-geometry.js?v=20261004';
 import { outline, pointClearance } from './clearance.js?v=20261004';
 import { oreArea, oreDistance } from './ore.js?v=20261004';
-import { SCOOP } from './config.js?v=20261004';
+import { SHIP, POLES } from './config.js?v=20261004';
 const { Engine, Body, Composite, Resolver, Events } = globalThis.Matter;
 // Cached penetration corrections otherwise keep translating a body after it
 // leaves contact, producing a visible burst that decays despite constant velocity.
@@ -77,6 +77,12 @@ export class Simulation {
     const wingB = Body.create({ ...OPTIONS, density: .004, position: { x: 13 / 3, y: -1 / 3 }, vertices: [{ x: 0, y: 20 }, { x: 13, y: -15 }, { x: 0, y: -6 }] });
     this.ship = Body.create({ ...OPTIONS, parts: [wingA, wingB] });
     this.shipPivot = { ...this.ship.position };
+    // Thrust and turning are sized for the empty ship; a held load adds mass
+    // and inertia, and thrust pushes from the engine rather than the shared
+    // center of mass, so an uneven load turns the ship.
+    this.shipBase = { mass: this.ship.mass, inertia: this.ship.inertia, pivot: { ...this.shipPivot }, parts: this.ship.parts.slice(1) };
+    this.poles = [-1, 1].map(side => ({ side, extension: 0, target: 0, held: null }));
+    this.grabs = 0;
     Body.setAngle(this.ship, -Math.PI / 2);
     Body.setPosition(this.ship, { x: -405, y: -25 });
     Composite.add(this.engine.world, this.ship);
@@ -94,7 +100,8 @@ export class Simulation {
     Body.setMass(body, (properties.massArea ?? properties.area) * OPTIONS.density);
     Body.setInertia(body, properties.inertia * OPTIONS.density);
     // Ore is part of the rock's shape; `ores` lists the nuggets inside it.
-    const entity = { body, pivot: { ...body.position }, shape, triangles, area: properties.area, detached, materialBounds, ores, oreArea: oreArea(ores) };
+    const pivot = { ...body.position }, radius = Math.max(...shape[0].map(p => Math.hypot(p.x - pivot.x, p.y - pivot.y)));
+    const entity = { body, pivot, radius, shape, triangles, area: properties.area, detached, materialBounds, ores, oreArea: oreArea(ores), held: null };
     entity.rockArea = Math.max(0, entity.area - entity.oreArea);
     const rotated = rotate(entity.pivot, angle);
     Body.setAngle(body, angle);
@@ -183,6 +190,8 @@ export class Simulation {
     } else {
       fracture = prepareFracture({ shape: entity.shape, ores: entity.ores, entry: bullet.entry, center: bullet.local, direction: bullet.direction, detached: entity.detached, through: bullet.through, enclosed: bullet.enclosed }, this.random);
     }
+    // A held piece leaves the pole before it breaks.
+    if (entity.held && fracture.mode !== 'none') this.release(entity);
     const center = localToWorld(entity, bullet.local);
     if (fracture.mode === 'none') {
       this.explosions++;
@@ -295,7 +304,7 @@ export class Simulation {
   pushOutside(point, launched = []) {
     const radius = 60;
     for (const rock of this.rocks) {
-      if (launched.includes(rock)) continue;
+      if (launched.includes(rock) || rock.held) continue;
       const distance = pointClearance(point, outline(rock, localToWorld), contains);
       if (distance >= radius) continue;
       const direction = normalize(sub(rock.body.position, point));
@@ -362,12 +371,13 @@ export class Simulation {
     };
     this.pendingSpins = this.pendingSpins.filter(pending => {
       const { entity, source, momentum } = pending;
-      if (!this.rocks.includes(entity)) return false;
-      const neighbors = pending.cohort.filter(other => this.rocks.includes(other));
+      // A piece grabbed before its tumble starts keeps the ship's spin.
+      if (!this.rocks.includes(entity) || entity.held) return false;
+      const neighbors = pending.cohort.filter(other => this.rocks.includes(other) && !other.held);
       const center = entity.body.position;
       const reach = Math.max(...entity.shape.flat().map(p => { const q = localToWorld(entity, p); return Math.hypot(q.x - center.x, q.y - center.y); }));
       if (!neighbors.every(other => pointClearance(center, material(other), contains) > reach + .5)) return true;
-      const partner = source && this.rocks.includes(source) ? source : [...neighbors].sort((x, y) => y.body.mass - x.body.mass)[0];
+      const partner = source && this.rocks.includes(source) && !source.held ? source : [...neighbors].sort((x, y) => y.body.mass - x.body.mass)[0];
       if (!partner) return false;
       Body.setAngularVelocity(entity.body, Body.getAngularVelocity(entity.body) + momentum / entity.body.inertia);
       Body.setAngularVelocity(partner.body, Body.getAngularVelocity(partner.body) - momentum / partner.body.inertia);
@@ -378,18 +388,23 @@ export class Simulation {
     const turn = Number(keys.has('KeyA')) - Number(keys.has('KeyS') || keys.has('KeyD'));
     // Detect contact before appreciable overlap develops. Resolving a deep
     // overlap moves a body without changing its velocity, creating a visible jump.
+    const { mass, inertia, pivot } = this.shipBase;
+    // Reaction wheels make up part of a load's extra inertia (SHIP.loadTurnShare).
+    const turning = inertia + SHIP.loadTurnShare * (this.ship.inertia - inertia);
     for (let i = 0; i < COLLISION_SUBSTEPS; i++) {
       if (keys.has('KeyW')) {
         const direction = rotate({ x: 0, y: 1 }, this.ship.angle);
-        Body.applyForce(this.ship, this.ship.position, { x: direction.x * this.ship.mass * .00016, y: direction.y * this.ship.mass * .00016 });
+        Body.applyForce(this.ship, this.shipToWorld(pivot), { x: direction.x * mass * .00016, y: direction.y * mass * .00016 });
       }
       // Matter clears forces after every substep; sustained controls must be
       // reapplied to preserve acceleration over the full simulation update.
-      this.ship.torque += turn * this.ship.inertia * .0000018;
+      this.ship.torque += turn * turning * .0000018;
       Engine.update(this.engine, STEP / COLLISION_SUBSTEPS);
     }
+    this.syncHeld();
     if (this.pendingSpins.length) this.applyPendingSpins();
     const dt = STEP / 1000;
+    this.updatePoles(dt);
     for (const bullet of this.bullets) {
       bullet.age += dt;
       if (bullet.state === 'flying') {
@@ -439,20 +454,120 @@ export class Simulation {
     }
     this.bullets = this.bullets.filter(b => b.state !== 'spent');
   }
-  // Pieces with ore that the bow is touching and nearly at rest relative to.
-  scoopable(reach = SCOOP.reach, maxArea = SCOOP.maxArea, maxSpeed = SCOOP.maxSpeed) {
-    const offset = rotate(sub({ x: 0, y: 25 }, this.shipPivot), this.ship.angle);
-    const bow = { x: this.ship.position.x + offset.x, y: this.ship.position.y + offset.y };
-    const shipVelocity = velocityAt(this.ship, bow);
-    return this.rocks.filter(rock => {
-      if (!rock.ores.length || rock.area > maxArea) return false;
-      const v = velocityAt(rock.body, bow);
-      if (Math.hypot(v.x - shipVelocity.x, v.y - shipVelocity.y) * 60 > maxSpeed) return false;
-      return pointClearance(bow, outline(rock, localToWorld), contains) <= reach;
-    });
+  // Ship coordinates (bow is +y) to world and back.
+  shipToWorld(p) {
+    const q = rotate(sub(p, this.shipPivot), this.ship.angle);
+    return { x: this.ship.position.x + q.x, y: this.ship.position.y + q.y };
+  }
+  shipToLocal(p) {
+    const q = rotate(sub(p, this.ship.position), -this.ship.angle);
+    return { x: q.x + this.shipPivot.x, y: q.y + this.shipPivot.y };
+  }
+  poleTip(pole, extension = pole.extension) {
+    const angle = POLES.angle * Math.PI / 180, reach = POLES.length * extension;
+    return { x: pole.side * (POLES.mountX + Math.sin(angle) * reach), y: POLES.mountY + Math.cos(angle) * reach };
+  }
+  get polesOut() { return this.poles.some(pole => pole.target === 1); }
+  get held() { return this.poles.filter(pole => pole.held).map(pole => pole.held); }
+  extendPoles() { for (const pole of this.poles) pole.target = 1; }
+  // A pole holding a piece stays out.
+  retractPoles() { for (const pole of this.poles) if (!pole.held) pole.target = 0; }
+  releaseAll() { for (const rock of this.held) this.release(rock); }
+  updatePoles(dt) {
+    for (const pole of this.poles) {
+      const change = dt / POLES.extendTime;
+      pole.extension = pole.target ? Math.min(1, pole.extension + change) : Math.max(0, pole.extension - change);
+      if (pole.target && pole.extension === 1 && !pole.held) {
+        const rock = this.grabbable(pole);
+        if (rock) this.grab(pole, rock);
+      }
+    }
+  }
+  // The nearest free piece the tip touches, light enough and nearly at rest relative to the tip.
+  grabbable(pole) {
+    const tip = this.shipToWorld(this.poleTip(pole)), tipVelocity = velocityAt(this.ship, tip);
+    let best = null, bestDistance = Infinity;
+    for (const rock of this.rocks) {
+      if (rock.held || rock.area > POLES.maxArea) continue;
+      if (Math.hypot(rock.body.position.x - tip.x, rock.body.position.y - tip.y) > rock.radius + POLES.grabReach) continue;
+      const v = velocityAt(rock.body, tip);
+      if (Math.hypot(v.x - tipVelocity.x, v.y - tipVelocity.y) * 60 > POLES.maxGrabSpeed) continue;
+      const distance = pointClearance(tip, outline(rock, localToWorld), contains);
+      if (distance <= POLES.grabReach && distance < bestDistance) { best = rock; bestDistance = distance; }
+    }
+    return best;
+  }
+  // Mass properties of the ship with everything it holds, in world space.
+  shipProperties() {
+    const parts = [{ mass: this.shipBase.mass, inertia: this.shipBase.inertia, center: this.shipToWorld(this.shipBase.pivot) },
+      ...this.held.map(rock => ({ mass: rock.body.mass, inertia: rock.body.inertia, center: { ...rock.body.position } }))];
+    const mass = parts.reduce((sum, p) => sum + p.mass, 0);
+    const center = { x: parts.reduce((sum, p) => sum + p.mass * p.center.x, 0) / mass, y: parts.reduce((sum, p) => sum + p.mass * p.center.y, 0) / mass };
+    const inertia = parts.reduce((sum, p) => sum + p.inertia + p.mass * ((p.center.x - center.x) ** 2 + (p.center.y - center.y) ** 2), 0);
+    return { mass, center, inertia };
+  }
+  // Rebuild the ship's compound body from its wings and the collision parts
+  // of what it holds. Matter's own compound inertia omits the parallel-axis
+  // terms, so mass, center and inertia are set from shipProperties.
+  rebuildShip(velocity, spin) {
+    const { mass, center, inertia } = this.shipProperties();
+    this.shipPivot = this.shipToLocal(center);
+    Body.setParts(this.ship, [...this.shipBase.parts, ...this.held.flatMap(rock => rock.held.parts)]);
+    Body.setCentre(this.ship, center);
+    Body.setMass(this.ship, mass);
+    Body.setInertia(this.ship, inertia);
+    Body.setVelocity(this.ship, velocity);
+    Body.setAngularVelocity(this.ship, spin);
+  }
+  // The piece joins the ship rigidly. A perfectly inelastic merge: linear and
+  // angular momentum are conserved.
+  grab(pole, rock) {
+    const ship = this.ship, body = rock.body;
+    const before = [ship, body].map(b => ({ mass: b.mass, inertia: b.inertia, center: { ...b.position }, velocity: Body.getVelocity(b), spin: Body.getAngularVelocity(b) }));
+    pole.held = rock;
+    rock.held = {
+      pole, local: this.shipToLocal(body.position), angle: body.angle - ship.angle,
+      // The ship takes copies of the piece's collision parts; its own body
+      // leaves the world and only follows the ship for drawing and aiming.
+      parts: body.parts.slice(1).map(part => Body.create({ ...OPTIONS, restitution: 0, label: 'Held rock', position: { ...part.position }, vertices: part.vertices.map(p => ({ x: p.x, y: p.y })) }))
+    };
+    Composite.remove(this.engine.world, body);
+    const { mass, center, inertia } = this.shipProperties();
+    const velocity = { x: before.reduce((sum, b) => sum + b.mass * b.velocity.x, 0) / mass, y: before.reduce((sum, b) => sum + b.mass * b.velocity.y, 0) / mass };
+    const momentum = before.reduce((sum, b) => sum + b.inertia * b.spin + b.mass * cross(sub(b.center, center), sub(b.velocity, velocity)), 0);
+    this.rebuildShip(velocity, momentum / inertia);
+    this.pendingSpins = this.pendingSpins.filter(pending => pending.entity !== rock);
+    this.grabs++;
+    this.lastGrab = rock;
+    this.syncHeld();
+  }
+  // Let go: the piece keeps the ship's motion at its position, so the split is rigid and conserves momentum.
+  release(rock) {
+    if (!rock.held) return;
+    this.syncHeld();
+    const velocity = velocityAt(this.ship, rock.body.position), spin = Body.getAngularVelocity(this.ship);
+    rock.held.pole.held = null;
+    rock.held = null;
+    Body.setVelocity(rock.body, velocity);
+    Body.setAngularVelocity(rock.body, spin);
+    Composite.add(this.engine.world, rock.body);
+    const { center } = this.shipProperties();
+    this.rebuildShip(velocityAt(this.ship, center), spin);
+  }
+  // Held pieces' own bodies follow the ship, so drawing, aiming and drilling see them in place.
+  syncHeld() {
+    const spin = Body.getAngularVelocity(this.ship);
+    for (const rock of this.held) {
+      const position = this.shipToWorld(rock.held.local);
+      Body.setPosition(rock.body, position);
+      Body.setAngle(rock.body, this.ship.angle + rock.held.angle);
+      Body.setVelocity(rock.body, velocityAt(this.ship, position));
+      Body.setAngularVelocity(rock.body, spin);
+    }
   }
   removeRock(entity) {
     if (!this.rocks.includes(entity)) return;
+    this.release(entity);
     Composite.remove(this.engine.world, entity.body);
     this.rocks.splice(this.rocks.indexOf(entity), 1);
     for (const bullet of this.bullets) if (bullet.entity === entity && bullet.state === 'drilling') bullet.state = 'spent';

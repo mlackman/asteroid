@@ -4,7 +4,7 @@ import { Simulation, STEP } from './physics.js?v=20261004';
 import { FracturePlanner } from './fracture-planner.js?v=20261004';
 import { Game, payout } from './game.js?v=20261004';
 import { placeOre } from './ore.js?v=20261004';
-import { ORE, STATION } from './config.js?v=20261004';
+import { ORE, STATION, POLES } from './config.js?v=20261004';
 import { updateHud, showEvent, describeBlast } from './hud.js?v=20261004';
 
 const status = document.querySelector('#status');
@@ -29,7 +29,7 @@ const cutMaterial = new THREE.LineBasicMaterial({ color: 0x59efb9, transparent: 
 const rockVisuals = new Map();
 let simulation, fracturePlanner, paused = false, showCuts = false, followShip = false, zoom = 1, accumulator = 0, last = 0;
 const game = new Game();
-let blastSerial = 0, telemetryTime = 0;
+let blastSerial = 0, grabSerial = 0, telemetryTime = 0;
 const keys = new Set(), particles = [], flashes = [];
 const rockLayer = new THREE.Group(); scene.add(rockLayer);
 
@@ -123,19 +123,36 @@ stationVisual.add(new THREE.Mesh(new THREE.RingGeometry(10, 14, 6), new THREE.Me
 
 // The ship is an actual open V: two narrow wings meet at the firing tip.
 const shipVisual = new THREE.Group(); scene.add(shipVisual);
+// Drawn in ship coordinates; the group is offset by the center of mass, which
+// moves when the ship holds something.
+const shipFrame = new THREE.Group(); shipVisual.add(shipFrame);
 const shipShape = new THREE.Shape();
 shipShape.moveTo(-13, -15); shipShape.lineTo(0, 20); shipShape.lineTo(13, -15); shipShape.lineTo(0, -6); shipShape.closePath();
 const shipMesh = new THREE.Mesh(new THREE.ShapeGeometry(shipShape), new THREE.MeshBasicMaterial({ color: 0x142f3b }));
-shipVisual.add(shipMesh);
+shipFrame.add(shipMesh);
 const shipOutline = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints([
   new THREE.Vector3(-13, -15, .1), new THREE.Vector3(0, 20, .1), new THREE.Vector3(13, -15, .1), new THREE.Vector3(0, -6, .1)
 ]), new THREE.LineBasicMaterial({ color: 0xadf8e2 }));
-shipVisual.add(shipOutline);
+shipFrame.add(shipOutline);
 const flameShape = new THREE.Shape(); flameShape.moveTo(-4, -7); flameShape.lineTo(0, -30); flameShape.lineTo(4, -7); flameShape.closePath();
 const flame = new THREE.Mesh(new THREE.ShapeGeometry(flameShape), new THREE.MeshBasicMaterial({ color: 0x91efd4, transparent: true, opacity: .7 }));
-shipVisual.add(flame);
+shipFrame.add(flame);
 const engineGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: 0x84eaca, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
-engineGlow.position.set(0, -12, .3); engineGlow.scale.set(32, 32, 1); shipVisual.add(engineGlow);
+engineGlow.position.set(0, -12, .3); engineGlow.scale.set(32, 32, 1); shipFrame.add(engineGlow);
+const poleMaterial = new THREE.LineBasicMaterial({ color: 0xc9d6dd });
+const poleLines = [-1, 1].map(() => {
+  const line = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3)), poleMaterial);
+  line.frustumCulled = false; shipFrame.add(line);
+  return line;
+});
+function syncPoles() {
+  simulation.poles.forEach((pole, i) => {
+    const line = poleLines[i], mount = simulation.poleTip(pole, 0), tip = simulation.poleTip(pole);
+    line.visible = pole.extension > 0;
+    line.geometry.attributes.position.array.set([mount.x, mount.y, .2, tip.x, tip.y, .2]);
+    line.geometry.attributes.position.needsUpdate = true;
+  });
+}
 function glowTexture() {
   const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
   const ctx = canvas.getContext('2d'), gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
@@ -217,24 +234,48 @@ function reset() {
   simulation = new Simulation(asteroid, Math.random, request => fracturePlanner.prepare(request));
   particles.length = 0;
   for (const f of flashes) { scene.remove(f.ring); f.ring.geometry.dispose(); f.ring.material.dispose(); } flashes.length = 0;
-  blastSerial = 0; accumulator = 0; keys.clear(); game.newRun();
+  blastSerial = 0; grabSerial = 0; accumulator = 0; keys.clear(); game.newRun();
   paused = false; updatePauseButton(); camera.position.set(-70, 0, 20);
   showEvent('READY · Point the bow at the surface and fire.');
   syncRocks(); syncBullets(); updateHud(game, simulation);
   status.hidden = true;
 }
-function collectAndDock() {
-  for (const rock of simulation.scoopable()) {
-    const item = { oreArea: rock.oreArea, rockArea: rock.rockArea < ORE.cleanTolerance ? 0 : rock.rockArea };
-    if (!game.collect(item)) { showEvent('HOLD FULL · Dock at the station to sell.'); continue; }
-    simulation.removeRock(rock);
-    const dirt = item.rockArea ? ` with ${item.rockArea.toFixed(0)} m² rock (cleaning fee)` : ' · clean';
-    showEvent(`SCOOPED · ${item.oreArea.toFixed(0)} m² ore${dirt} · worth ${payout(item).toFixed(0)} CR`);
+const cargoItem = rock => ({ oreArea: rock.oreArea, rockArea: rock.rockArea < ORE.cleanTolerance ? 0 : rock.rockArea });
+function describePiece(rock) {
+  if (!rock.ores.length) return `${rock.area.toFixed(0)} m² rock · no ore`;
+  const item = cargoItem(rock);
+  return `${item.oreArea.toFixed(0)} m² ore${item.rockArea ? ` + ${item.rockArea.toFixed(0)} m² rock` : ' · clean'} · worth ${payout(item).toFixed(0)} CR`;
+}
+// E: extend the poles, or retract them. Retracting stows small ore-bearing
+// pieces in the hold; anything else stays on its pole.
+function togglePoles() {
+  if (!simulation.polesOut) { simulation.extendPoles(); showEvent('POLES OUT · Touch a piece with a pole tip to grab it.'); return; }
+  const stowed = [], kept = [];
+  for (const rock of simulation.held) {
+    if (!rock.ores.length) kept.push('no ore, release it with Q');
+    else if (rock.area > POLES.stowMaxArea) kept.push('too big to stow, carry it to the station');
+    else if (!game.collect(cargoItem(rock))) kept.push('hold full');
+    else { stowed.push(cargoItem(rock)); simulation.removeRock(rock); }
   }
-  const ship = simulation.ship;
+  simulation.retractPoles();
+  const parts = [];
+  if (stowed.length) parts.push(`STOWED · ${stowed.reduce((sum, item) => sum + item.oreArea, 0).toFixed(0)} m² ore`);
+  if (kept.length) parts.push(`HELD · ${kept.join(' · ')}`);
+  showEvent(parts.length ? parts.join(' · ') : 'POLES IN');
+}
+function releasePoles() {
+  if (!simulation.held.length) return;
+  simulation.releaseAll();
+  showEvent('RELEASED');
+}
+// Dock slowly inside the ring: sell the hold and the ore carried on the poles.
+function dock() {
+  const ship = simulation.ship, carried = simulation.held.filter(rock => rock.ores.length);
   const distance = Math.hypot(ship.position.x - STATION.position.x, ship.position.y - STATION.position.y);
-  const sale = game.updateDocking(distance, Math.hypot(ship.velocity.x, ship.velocity.y) * 60);
-  if (sale) showEvent(sale.items ? `DOCKED · Sold ${sale.items} ${sale.items === 1 ? 'piece' : 'pieces'} for ${sale.credits.toFixed(0)} CR · refuelled and rearmed` : 'DOCKED · Refuelled and rearmed');
+  const sale = game.updateDocking(distance, Math.hypot(ship.velocity.x, ship.velocity.y) * 60, carried.map(cargoItem));
+  if (!sale) return;
+  for (const rock of carried) simulation.removeRock(rock);
+  showEvent(sale.items ? `DOCKED · Sold ${sale.items} ${sale.items === 1 ? 'piece' : 'pieces'} for ${sale.credits.toFixed(0)} CR · refuelled and rearmed` : 'DOCKED · Refuelled and rearmed');
 }
 function resize() {
   renderer.setSize(innerWidth, innerHeight);
@@ -248,9 +289,11 @@ function updatePauseButton() {
 function togglePause() { paused = !paused; accumulator = 0; keys.clear(); updatePauseButton(); }
 window.addEventListener('resize', resize);
 window.addEventListener('keydown', event => {
-  if (['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyR', 'KeyP'].includes(event.code)) event.preventDefault();
+  if (['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyR', 'KeyP', 'KeyE', 'KeyQ'].includes(event.code)) event.preventDefault();
   if (event.code === 'KeyR' && !event.repeat) reset();
   else if (event.code === 'KeyP' && !event.repeat) togglePause();
+  else if (event.code === 'KeyE' && !event.repeat && !paused) togglePoles();
+  else if (event.code === 'KeyQ' && !event.repeat && !paused) releasePoles();
   else if (event.code === 'Space' && !event.repeat && !paused) {
     if (game.tryFire()) simulation.fire();
     keys.add(event.code);
@@ -292,20 +335,22 @@ function frame(time) {
         break;
       }
       if (simulation.explosions > blastSerial) { blastSerial = simulation.explosions; blastEffect(simulation.lastBlast); }
+      if (simulation.grabs > grabSerial) { grabSerial = simulation.grabs; showEvent(`GRABBED · ${describePiece(simulation.lastGrab)}`); }
       accumulator -= STEP;
     }
     if (game.thrusting && Math.random() < dt * 90) {
       const dir = new THREE.Vector2(0, -1).rotateAround(new THREE.Vector2(), simulation.ship.angle);
-      particles.push({ x: simulation.ship.position.x + dir.x * 12, y: simulation.ship.position.y + dir.y * 12, vx: dir.x * 80 + simulation.ship.velocity.x * 60, vy: dir.y * 80 + simulation.ship.velocity.y * 60, life: .35, maxLife: .35, warm: false });
+      const engine = simulation.shipToWorld({ x: 0, y: -12 });
+      particles.push({ x: engine.x, y: engine.y, vx: dir.x * 80 + simulation.ship.velocity.x * 60, vy: dir.y * 80 + simulation.ship.velocity.y * 60, life: .35, maxLife: .35, warm: false });
     }
     effects(dt);
-    collectAndDock();
+    dock();
   }
   syncRocks(); syncBullets();
   shipVisual.position.set(simulation.ship.position.x, simulation.ship.position.y, 2);
   shipVisual.rotation.z = simulation.ship.angle;
-  shipMesh.position.set(-simulation.shipPivot.x, -simulation.shipPivot.y, 0);
-  shipOutline.position.copy(shipMesh.position);
+  shipFrame.position.set(-simulation.shipPivot.x, -simulation.shipPivot.y, 0);
+  syncPoles();
   flame.visible = engineGlow.visible = game.thrusting && !paused;
   flame.scale.y = .8 + Math.random() * .4;
   // A fixed world view makes constant-velocity drift visible. Optional follow

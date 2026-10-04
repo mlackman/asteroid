@@ -24,18 +24,28 @@ export const SHIP = {
   hullMax: 100,
   cargoCapacity: 1500,     // area of material (ore plus attached rock) the hold takes
   fireInterval: .38,       // seconds between rounds while the trigger is held
-  fuelPerSecond: 2.5       // main-engine burn; turning uses reaction wheels and is free
+  fuelPerSecond: 2.5,      // main-engine burn; turning uses reaction wheels and is free
+  // Thrust and turning torque are sized for the empty ship, so a load slows both.
+  // 0: a load slows turning fully by its inertia; 1: the ship turns as if empty.
+  loadTurnShare: .25
 };
 
-export const SCOOP = {
-  reach: 6,                // distance from the bow at which a piece is scooped
-  maxArea: 900,            // largest piece (ore plus rock) the scoop takes
-  maxSpeed: 40             // highest speed relative to the piece that still scoops it
+// Two rigid grappling poles, one on each wing. A pole grabs a piece its tip
+// touches; the piece then moves as part of the ship.
+export const POLES = {
+  length: 30,              // reach from the mount when fully extended
+  mountX: 9,               // mount on each wing, ship coordinates (bow is +y)
+  mountY: -6,
+  angle: 55,               // degrees out from the bow
+  extendTime: .25,         // seconds to extend or retract
+  grabReach: 2,            // tip-to-surface distance that grabs
+  maxGrabSpeed: 30,        // highest speed relative to the piece that still grabs it
+  maxArea: 1500,           // heaviest piece a pole holds (area of ore plus rock)
+  stowMaxArea: 900         // largest piece that retracting a pole stows in the hold
 };
 
 export const ECONOMY = {
-  oreValue: 1,             // credits per unit of ore area
-  cleaningFee: .5          // credits per unit of rock area still stuck to delivered ore
+  oreValue: 1              // credits per unit of ore area; attached rock pays nothing
 };
 
 export const STATION = {

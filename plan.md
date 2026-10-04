@@ -36,11 +36,18 @@ you lose your cargo (or your ship, in a hardcore mode).
   (`ORE.detachExposure`) it separates from its rock. Rock too small to stand
   alone (`ORE.minRockPiece`) stays stuck to it as crust. A nugget can also fly
   off still embedded in a fragment.
-- **Scoop** ore-bearing pieces (clean or dirty) by touching them with the bow
-  at low relative speed. Attached rock takes hold space and costs a cleaning
-  fee at the station; shooting the rock off first pays more.
+- **Grappling poles** (replaced touch-scooping): a rigid pole on each wing.
+  **E** extends them; a tip touching a light, slow piece grabs it and the
+  piece becomes part of the ship's rigid body. A load adds mass and inertia
+  (thrust and turning are sized for the empty ship) and an uneven load turns
+  the ship under thrust, so loads are balanced across both poles. **E**
+  retracts, stowing small ore-bearing pieces in the hold; large pieces are
+  carried to the station on the pole. **Q** releases. Any piece can be
+  grabbed, ore or not.
+- No cleaning fee: ore pays by area; attached rock only costs mass and hold
+  space, so shooting the rock off first still pays.
 - **Station** docking ring: arrive slowly to sell, refuel and rearm.
-- All tunables live in `config.js` (ORE, SHIP, SCOOP, ECONOMY, STATION).
+- All tunables live in `config.js` (ORE, SHIP, POLES, ECONOMY, STATION).
 - Open: does it feel good? Tune nugget depth/size, reveal and detach shares,
   fee, by playtesting.
 
@@ -88,7 +95,7 @@ you lose your cargo (or your ship, in a hardcore mode).
 ### M5: Polish and meta
 
 - Contracts at the station ("deliver 1 intact chunk of >500 area", "clear a lane").
-- Sound, particles for ore sparkle and scooping, screen shake.
+- Sound, particles for ore sparkle and grabbing, screen shake.
 - Optional: a daily seed plus a leaderboard as the first step toward online play.
 
 ## Technical risks
@@ -105,4 +112,4 @@ you lose your cargo (or your ship, in a hardcore mode).
 1. **Roguelite or persistent?** Losing the ship on death (tense, short runs) versus
    losing only the cargo (relaxed, longer progression). Suggested: lose cargo,
    with hardcore mode as an option.
-2. **Tractor beam** for towing pieces too large to scoop: later unlock (M3).
+2. **Pole upgrades** (M3): longer reach, higher load limit, stronger reaction wheels.
